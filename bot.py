@@ -197,7 +197,14 @@ async def main():
     await site.start()
     print(f"Порт {PORT} открыт - Render может пройти проверку")
 
-    # ШАГ 2: только после открытия порта запускаем Long Polling.
+    # ШАГ 2: сбрасываем все старые сессии Telegram перед стартом.
+    # Это устраняет TelegramConflictError - ошибку конфликта getUpdates,
+    # которая возникает если предыдущий процесс не завершился чисто.
+    # drop_pending_updates=True также сбрасывает накопившуюся очередь сообщений.
+    await bot.delete_webhook(drop_pending_updates=True)
+    print("Старые сессии сброшены")
+
+    # ШАГ 3: только после открытия порта и сброса сессий запускаем Long Polling.
     # aiohttp-сервер продолжает работать в фоне того же event loop.
     print("Бот запущен в режиме Long Polling...")
     await dp.start_polling(bot)
