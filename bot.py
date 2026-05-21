@@ -11,9 +11,10 @@ from pydub import AudioSegment
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
-from aiogram.types import Message
+from aiogram.types import CallbackQuery, Message
 
 from database import init_db, get_or_create_user, get_today_calories, log_food_to_db
+from keyboards import get_main_menu
 from openrouter_client import ask_gemini
 
 # Указываем pydub использовать ffmpeg из пакета imageio-ffmpeg,
@@ -67,11 +68,12 @@ async def start_handler(message: Message):
     name = message.from_user.full_name or "друг"
     target = get_or_create_user(user_id, name)
     await message.answer(
-        f"Привет, {name}! Я твой персональный ИИ-тренер и умный дневник питания.\n\n"
-        f"Твоя дневная норма - {target} ккал.\n\n"
-        f"Просто скажи или напиши, что ты съел - я найду точные КБЖУ и всё запишу. "
-        f"Можешь также спрашивать советы, просить план питания или уточнять - "
-        f"можно ли съесть тот или иной продукт."
+        f"Привет, {name}! 👋 Я твой персональный ИИ-тренер и умный дневник питания.\n\n"
+        f"📊 Твоя дневная норма - {target} ккал.\n\n"
+        f"🍎 Просто скажи или напиши, что ты съел - я найду точные КБЖУ и всё запишу.\n"
+        f"💡 Можешь спрашивать советы, просить план питания или уточнять, "
+        f"можно ли съесть тот или иной продукт.",
+        reply_markup=get_main_menu(),
     )
 
 
@@ -120,8 +122,6 @@ async def voice_handler(message: Message):
         if wav_tmp and os.path.exists(wav_tmp):
             os.unlink(wav_tmp)
 
-    await message.answer(f"Распознал: \"{recognized_text}\"\nОбрабатываю...")
-
     try:
         await _process_ai_response(message, user_id, recognized_text, context)
     except RuntimeError as e:
@@ -138,12 +138,32 @@ async def text_handler(message: Message):
     eaten_today = get_today_calories(user_id, date_str)
     context = _build_context(target, eaten_today)
 
-    await message.answer("Обрабатываю...")
-
     try:
         await _process_ai_response(message, user_id, message.text, context)
     except RuntimeError as e:
         await message.answer(f"Ошибка при обращении к ИИ: {e}")
+
+
+# ---------------------------------------------------------------------------
+# Обработчики кнопок меню
+# ---------------------------------------------------------------------------
+
+@dp.callback_query(F.data == "diary_today")
+async def cb_diary_today(callback: CallbackQuery):
+    await callback.answer()
+    await callback.message.answer("📊 Функция в разработке - скоро здесь появится твой дневник за сегодня.")
+
+
+@dp.callback_query(F.data == "diary_week")
+async def cb_diary_week(callback: CallbackQuery):
+    await callback.answer()
+    await callback.message.answer("📅 Функция в разработке - скоро здесь появится статистика за неделю.")
+
+
+@dp.callback_query(F.data == "ask_food")
+async def cb_ask_food(callback: CallbackQuery):
+    await callback.answer()
+    await callback.message.answer("💡 Напиши или скажи голосом название продукта - я скажу, стоит ли его есть.")
 
 
 # ---------------------------------------------------------------------------
