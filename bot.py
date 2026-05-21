@@ -6,6 +6,7 @@ from datetime import datetime
 
 import imageio_ffmpeg
 import speech_recognition as sr
+from aiohttp import web
 from pydub import AudioSegment
 
 from aiogram import Bot, Dispatcher, F
@@ -146,13 +147,39 @@ async def text_handler(message: Message):
 
 
 # ---------------------------------------------------------------------------
+# Фоновый веб-сервер - нужен только для прохождения Port Binding на Render.
+# Render требует, чтобы процесс слушал порт в течение первых 5 минут.
+# Сам бот работает через Long Polling и этот сервер не использует.
+# ---------------------------------------------------------------------------
+
+PORT = int(os.environ.get("PORT", 10000))
+
+
+async def handle_ping(request: web.Request) -> web.Response:
+    return web.Response(text="OK")
+
+
+async def _run_health_server():
+    app = web.Application()
+    app.add_routes([web.get("/", handle_ping)])
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, host="0.0.0.0", port=PORT)
+    await site.start()
+    print(f"Health-сервер слушает порт {PORT}")
+
+
+# ---------------------------------------------------------------------------
 # Точка входа
 # ---------------------------------------------------------------------------
 
 async def main():
     init_db()
     print("Бот запущен в режиме Long Polling...")
-    await dp.start_polling(bot)
+    await asyncio.gather(
+        _run_health_server(),
+        dp.start_polling(bot),
+    )
 
 
 if __name__ == "__main__":
