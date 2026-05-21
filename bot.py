@@ -159,27 +159,28 @@ async def handle_ping(request: web.Request) -> web.Response:
     return web.Response(text="OK")
 
 
-async def _run_health_server():
-    app = web.Application()
-    app.add_routes([web.get("/", handle_ping)])
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, host="0.0.0.0", port=PORT)
-    await site.start()
-    print(f"Health-сервер слушает порт {PORT}")
-
-
 # ---------------------------------------------------------------------------
 # Точка входа
 # ---------------------------------------------------------------------------
 
 async def main():
     init_db()
+
+    # ШАГ 1: сначала поднимаем веб-сервер и ГАРАНТИРОВАННО открываем порт.
+    # site.start() регистрирует сервер в event loop и сразу возвращает управление -
+    # он не блокирует. После этой строки порт уже слушается.
+    app = web.Application()
+    app.add_routes([web.get("/", handle_ping)])
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, host="0.0.0.0", port=PORT)
+    await site.start()
+    print(f"Порт {PORT} открыт - Render может пройти проверку")
+
+    # ШАГ 2: только после открытия порта запускаем Long Polling.
+    # aiohttp-сервер продолжает работать в фоне того же event loop.
     print("Бот запущен в режиме Long Polling...")
-    await asyncio.gather(
-        _run_health_server(),
-        dp.start_polling(bot),
-    )
+    await dp.start_polling(bot)
 
 
 if __name__ == "__main__":
