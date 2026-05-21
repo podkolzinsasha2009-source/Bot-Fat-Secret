@@ -1,24 +1,25 @@
+import asyncio
 import io
 import os
 import tempfile
 from datetime import datetime
 
+import imageio_ffmpeg
 import speech_recognition as sr
 from pydub import AudioSegment
 
-from aiohttp import web
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
 from aiogram.types import Message
-from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 
 from database import init_db, get_or_create_user, get_today_calories, log_food_to_db
 from openrouter_client import ask_gemini
 
+# Указываем pydub использовать ffmpeg из пакета imageio-ffmpeg,
+# а не искать системный ffmpeg - это решает проблему на Windows и Render.
+AudioSegment.converter = imageio_ffmpeg.get_ffmpeg_exe()
+
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
-WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "").rstrip("/")
-PORT = int(os.environ.get("PORT", 10000))
-WEBHOOK_PATH = "/webhook"
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
@@ -145,47 +146,14 @@ async def text_handler(message: Message):
 
 
 # ---------------------------------------------------------------------------
-# Жизненный цикл веб-сервера
-# ---------------------------------------------------------------------------
-
-async def on_startup(app: web.Application):
-    init_db()
-    if not WEBHOOK_URL:
-        print("CRITICAL: env var WEBHOOK_URL is not set - bot will not receive updates")
-        return
-    full_url = f"{WEBHOOK_URL}{WEBHOOK_PATH}"
-    await bot.set_webhook(full_url)
-    print(f"Webhook registered: {full_url}")
-
-
-async def on_shutdown(app: web.Application):
-    await bot.delete_webhook()
-    print("Webhook deleted")
-
-
-async def health_check(request: web.Request) -> web.Response:
-    return web.Response(text="OK")
-
-
-# ---------------------------------------------------------------------------
 # Точка входа
 # ---------------------------------------------------------------------------
 
-def main():
-    app = web.Application()
-
-    app.on_startup.append(on_startup)
-    app.on_shutdown.append(on_shutdown)
-
-    # GET / - health check для UptimeRobot
-    app.router.add_get("/", health_check)
-
-    # POST /webhook - входящие апдейты от Telegram
-    SimpleRequestHandler(dispatcher=dp, bot=bot).register(app, path=WEBHOOK_PATH)
-    setup_application(app, dp, bot=bot)
-
-    web.run_app(app, host="0.0.0.0", port=PORT)
+async def main():
+    init_db()
+    print("Бот запущен в режиме Long Polling...")
+    await dp.start_polling(bot)
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
