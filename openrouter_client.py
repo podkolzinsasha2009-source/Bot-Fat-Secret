@@ -6,7 +6,7 @@ import aiohttp
 
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
-MODEL = "openai/gpt-4o-mini"
+MODEL = "google/gemini-2.5-flash-lite"
 
 SYSTEM_PROMPT = """Возвращай ТОЛЬКО JSON. Никакого текста вне JSON.
 Без приветствий, пожеланий, вводных слов и советов по здоровью.
