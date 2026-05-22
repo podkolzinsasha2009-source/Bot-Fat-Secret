@@ -192,13 +192,15 @@ def _fmt_daily_log(foods: list[dict], target: int) -> str:
         total_p   += item.get("p", 0)
         total_f   += item.get("f", 0)
         total_c   += item.get("c", 0)
-        emoji = _pick_emoji(item.get("name", ""))
+        emoji  = _pick_emoji(item.get("name", ""))
+        weight = item.get("weight") or 0
+        weight_part = f" \\({_esc(str(int(weight)))}г\\)" if weight > 0 else ""
         cal = f"{item.get('calories', 0):.0f}"
         p   = f"{item.get('p', 0):.1f}"
         f_  = f"{item.get('f', 0):.1f}"
         c   = f"{item.get('c', 0):.1f}"
         lines.append(
-            f"{emoji} *{_esc(item['name'])}:* {_esc(cal)} ккал "
+            f"{emoji} *{_esc(item['name'])}*{weight_part}: {_esc(cal)} ккал "
             f"\\| Б: {_esc(p)} \\| Ж: {_esc(f_)} \\| У: {_esc(c)}"
         )
 
@@ -332,6 +334,7 @@ async def _process_ai_response(
                     user_id, date_str, product_name, product_name,
                     data.get("calories", 0), data.get("p", 0),
                     data.get("f", 0), data.get("c", 0),
+                    weight=data.get("new_weight", 0),
                 )
             foods = get_today_foods(user_id, date_str)
             await message.answer(_fmt_daily_log(foods, target), parse_mode="MarkdownV2")

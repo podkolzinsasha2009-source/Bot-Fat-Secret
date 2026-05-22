@@ -37,6 +37,13 @@ def init_db():
         """)
         conn.commit()
 
+        # Миграция: добавляем колонку weight в существующие БД (безопасно игнорирует если уже есть)
+        try:
+            cursor.execute("ALTER TABLE nutrition_logs ADD COLUMN weight REAL DEFAULT 0")
+            conn.commit()
+        except sqlite3.OperationalError:
+            pass  # Колонка уже существует
+
 
 def get_or_create_user(user_id: int, name: str) -> int:
     with sqlite3.connect(DB_PATH) as conn:
@@ -73,13 +80,14 @@ def log_food_to_db(user_id: int, date_str: str, meal_type: str, items: list[dict
         for item in items:
             cursor.execute(
                 """INSERT INTO nutrition_logs
-                   (user_id, date, meal_type, product_name, calories, proteins, fats, carbs)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                   (user_id, date, meal_type, product_name, weight, calories, proteins, fats, carbs)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     user_id,
                     date_str,
                     meal_type,
                     item.get("name", ""),
+                    float(item.get("weight", 0)),
                     float(item.get("calories", 0)),
                     float(item.get("p", 0)),
                     float(item.get("f", 0)),
@@ -93,14 +101,14 @@ def get_today_foods(user_id: int, date_str: str) -> list[dict]:
     with sqlite3.connect(DB_PATH) as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT id, meal_type, product_name, calories, proteins, fats, carbs "
+            "SELECT id, meal_type, product_name, weight, calories, proteins, fats, carbs "
             "FROM nutrition_logs WHERE user_id = ? AND date = ? ORDER BY id",
             (user_id, date_str),
         )
         rows = cursor.fetchall()
         return [
-            {"id": r[0], "meal_type": r[1], "name": r[2],
-             "calories": r[3], "p": r[4], "f": r[5], "c": r[6]}
+            {"id": r[0], "meal_type": r[1], "name": r[2], "weight": r[3],
+             "calories": r[4], "p": r[5], "f": r[6], "c": r[7]}
             for r in rows
         ]
 
@@ -124,19 +132,27 @@ def update_food_in_db(
     user_id: int, date_str: str,
     old_name: str, new_name: str,
     calories: float, p: float, f: float, c: float,
+    weight: float = 0,
 ) -> bool:
     with sqlite3.connect(DB_PATH) as conn:
         cursor = conn.cursor()
-        cursor.execute(
-            """UPDATE nutrition_logs
-               SET product_name = ?, calories = ?, proteins = ?, fats = ?, carbs = ?
-               WHERE id = (
-                 SELECT id FROM nutrition_logs
-                 WHERE user_id = ? AND date = ? AND LOWER(product_name) LIKE LOWER(?)
-                 ORDER BY id DESC LIMIT 1
-               )""",
-            (new_name, calories, p, f, c, user_id, date_str, f"%{old_name}%"),
+        sub = (
+            "SELECT id FROM nutrition_logs "
+            "WHERE user_id = ? AND date = ? AND LOWER(product_name) LIKE LOWER(?) "
+            "ORDER BY id DESC LIMIT 1"
         )
+        if weight > 0:
+            cursor.execute(
+                f"UPDATE nutrition_logs SET product_name=?, weight=?, calories=?, proteins=?, fats=?, carbs=? "
+                f"WHERE id = ({sub})",
+                (new_name, weight, calories, p, f, c, user_id, date_str, f"%{old_name}%"),
+            )
+        else:
+            cursor.execute(
+                f"UPDATE nutrition_logs SET product_name=?, calories=?, proteins=?, fats=?, carbs=? "
+                f"WHERE id = ({sub})",
+                (new_name, calories, p, f, c, user_id, date_str, f"%{old_name}%"),
+            )
         conn.commit()
         return cursor.rowcount > 0
 
