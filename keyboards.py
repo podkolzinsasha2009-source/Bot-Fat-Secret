@@ -1,4 +1,7 @@
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.types import (
+    InlineKeyboardButton, InlineKeyboardMarkup,
+    KeyboardButton, ReplyKeyboardMarkup,
+)
 
 
 def get_main_menu() -> InlineKeyboardMarkup:
@@ -8,3 +11,18 @@ def get_main_menu() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="💡 Можно ли мне это?", callback_data="ask_food")],
     ]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def get_reply_menu() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [
+                KeyboardButton(text="📊 Статистика за день"),
+                KeyboardButton(text="💪 Добавить тренировку"),
+            ],
+            [
+                KeyboardButton(text="🧹 Сбросить день"),
+            ],
+        ],
+        resize_keyboard=True,
+    )

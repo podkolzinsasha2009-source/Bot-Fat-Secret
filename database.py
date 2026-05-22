@@ -26,6 +26,15 @@ def init_db():
                 carbs REAL
             )
         """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS activity_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                date TEXT,
+                description TEXT,
+                burned_calories REAL
+            )
+        """)
         conn.commit()
 
 
@@ -137,6 +146,37 @@ def clear_today_foods(user_id: int, date_str: str) -> None:
         cursor = conn.cursor()
         cursor.execute(
             "DELETE FROM nutrition_logs WHERE user_id = ? AND date = ?",
+            (user_id, date_str),
+        )
+        conn.commit()
+
+
+def log_activity_to_db(user_id: int, date_str: str, description: str, burned_calories: float) -> None:
+    with sqlite3.connect(DB_PATH) as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO activity_logs (user_id, date, description, burned_calories) VALUES (?, ?, ?, ?)",
+            (user_id, date_str, description, float(burned_calories)),
+        )
+        conn.commit()
+
+
+def get_today_burned(user_id: int, date_str: str) -> float:
+    with sqlite3.connect(DB_PATH) as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT SUM(burned_calories) FROM activity_logs WHERE user_id = ? AND date = ?",
+            (user_id, date_str),
+        )
+        row = cursor.fetchone()
+        return row[0] if row[0] is not None else 0.0
+
+
+def clear_today_activity(user_id: int, date_str: str) -> None:
+    with sqlite3.connect(DB_PATH) as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "DELETE FROM activity_logs WHERE user_id = ? AND date = ?",
             (user_id, date_str),
         )
         conn.commit()

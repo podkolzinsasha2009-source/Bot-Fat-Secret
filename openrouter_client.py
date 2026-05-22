@@ -9,36 +9,39 @@ OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 MODEL = "openai/gpt-4o-mini"
 
 SYSTEM_PROMPT = """Возвращай ТОЛЬКО JSON. Никакого текста вне JSON.
-Ответ максимально короткий и плотный. Запрещены: приветствия, пожелания, вводные слова, советы по здоровью, вежливые заключения. Только расчёт КБЖУ.
+Без приветствий, пожеланий, вводных слов и советов по здоровью.
 
-Пример вывода для составного блюда (генерируется ботом):
-  *Гречка отварная:* 132 ккал | Б: 4.9 | Ж: 1.7 | У: 23.3
-  *Сосиски Губкинские:* 235 ккал | Б: 9.6 | Ж: 20.8 | У: 1.2
+Определи тип запроса:
+- описание съеденной еды → type "food"
+- активность (шаги, тренировка, бег, велосипед, прогулка) → type "activity"
+- вопрос или просьба совета → type "question"
+
+TYPE "food" — action: log_food | delete_food | edit_food | change_weight
+Составное блюдо → разбей на отдельные ингредиенты (каждый своим объектом в items).
+Для каждого продукта подбери подходящий эмодзи (поле "emoji").
+Формат вывода (бот строит из данных):
+  [emoji] *Название:* X ккал | Б: X | Ж: X | У: X
   ーーー
-  *Итого за приём:* 367 ккал | Б: 14.5 | Ж: 22.5 | У: 24.5
+  📊 *Итого за приём:* X ккал | Б: X | Ж: X | У: X
 
-СЛУЧАЙ 1 — еда → action: "log_food"
-Составное блюдо — разбивай на отдельные ингредиенты (каждый своим объектом в items).
-{"action":"log_food","data":{"meal_type":"Завтрак|Обед|Ужин|Перекус","items":[{"name":"Название","weight":100,"calories":0,"p":0.0,"f":0.0,"c":0.0}]}}
+{"type":"food","action":"log_food","data":{"meal_type":"Завтрак|Обед|Ужин|Перекус","items":[{"name":"Название","emoji":"🍗","weight":100,"calories":0,"p":0.0,"f":0.0,"c":0.0}]}}
+{"type":"food","action":"delete_food","data":{"product_name":"Точное название из рациона"}}
+{"type":"food","action":"edit_food","data":{"old_name":"Старое название из рациона","new_name":"Правильное название","calories":0,"p":0.0,"f":0.0,"c":0.0}}
+{"type":"food","action":"change_weight","data":{"product_name":"Название из рациона","new_weight":200,"calories":0,"p":0.0,"f":0.0,"c":0.0}}
 
-СЛУЧАЙ 2 — "убери ...", "удали ..." → action: "delete_food"
-{"action":"delete_food","data":{"product_name":"Точное название из рациона"}}
+TYPE "activity" — шаги, тренировки, физическая нагрузка
+Расчёт: 10000 шагов ≈ 350-400 ккал. Ходьба с рюкзаком / в гору / с грузом → +25% к расходу.
+{"type":"activity","burned_calories":350,"description":"10000 шагов"}
 
-СЛУЧАЙ 3 — "ты ошибся, это не X, а Y" / "это не X, а Y" → action: "edit_food"
-Переименуй и скорректируй КБЖУ. Без дубликатов.
-{"action":"edit_food","data":{"old_name":"Старое название из рациона","new_name":"Правильное название","calories":0,"p":0.0,"f":0.0,"c":0.0}}
-
-СЛУЧАЙ 4 — "я съел не Xг, а Yг" / "не X грамм, а Y" → action: "change_weight"
-Пересчитай КБЖУ на новый вес.
-{"action":"change_weight","data":{"product_name":"Название из рациона","new_weight":200,"calories":0,"p":0.0,"f":0.0,"c":0.0}}
-
-СЛУЧАЙ 5 — вопрос или совет → action: "consultation"
-{"action":"consultation","data":null,"user_message":"Краткий сухой ответ."}"""
+TYPE "question" — вопросы, советы, рекомендации
+Используй контекст дня: съедено, сожжено, чистый баланс, остаток до нормы.
+Ответ краткий и конкретный. Начни с релевантного эмодзи.
+{"type":"question","reply":"🍦 Мороженое можно! Остаток 500 ккал, белок уже набран."}"""
 
 
 def _extract_json(text: str) -> dict:
     text = text.strip()
-    # Strip Qwen3 thinking tags if present
+    # Strip thinking tags (Qwen / o1 style)
     text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
     text = re.sub(r"^```(?:json)?\s*", "", text)
     text = re.sub(r"\s*```$", "", text)
