@@ -165,8 +165,11 @@ async def ask_gemini(user_text: str, context_info: str) -> dict:
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": full_user_message},
         ],
-        "response_format": {"type": "json_object"},
     }
+    # Perplexity (sonar) не поддерживает response_format через OpenRouter — 400 ошибка.
+    # Для остальных моделей (OpenAI, Gemini) включаем json_object для надёжности.
+    if "sonar" not in MODEL and "perplexity" not in MODEL:
+        payload["response_format"] = {"type": "json_object"}
 
     timeout = aiohttp.ClientTimeout(total=60)
     async with aiohttp.ClientSession(timeout=timeout) as session:
