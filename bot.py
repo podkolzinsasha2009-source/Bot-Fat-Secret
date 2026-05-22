@@ -1,6 +1,7 @@
 import asyncio
 import io
 import os
+import re
 import tempfile
 from datetime import datetime
 
@@ -13,12 +14,13 @@ from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
 from aiogram.types import CallbackQuery, Message
 
-from database import init_db, get_or_create_user, get_today_calories, log_food_to_db
+from database import (
+    init_db, get_or_create_user, log_food_to_db,
+    get_today_foods, delete_food_from_db, update_food_in_db, clear_today_foods,
+)
 from keyboards import get_main_menu
 from openrouter_client import ask_gemini
 
-# Указываем pydub использовать ffmpeg из пакета imageio-ffmpeg,
-# а не искать системный ffmpeg - это решает проблему на Windows и Render.
 AudioSegment.converter = imageio_ffmpeg.get_ffmpeg_exe()
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
@@ -26,35 +28,175 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
+_CLEAR_PHRASES = [
+    "очистить калории", "сбросить калории", "обнулить калории",
+    "очисти калории", "сбрось калории", "очистить рацион", "сбросить рацион",
+]
+
+
+# ---------------------------------------------------------------------------
+# MarkdownV2 helpers
+# ---------------------------------------------------------------------------
+
+def _esc(text) -> str:
+    return re.sub(r'([_*\[\]()~`>#+\-=|{}.!\\])', r'\\\1', str(text))
+
+
+def _fmt_food_items(items: list[dict], target: int, eaten_before: float) -> str:
+    lines = []
+    total_cal = sum(i.get("calories", 0) for i in items)
+    total_p = sum(i.get("p", 0) for i in items)
+    total_f = sum(i.get("f", 0) for i in items)
+    total_c = sum(i.get("c", 0) for i in items)
+
+    for item in items:
+        weight = item.get("weight", 0)
+        name = item.get("name", "") + (f" ({weight}г)" if weight else "")
+        cal = f"{item.get('calories', 0):.0f}"
+        p   = f"{item.get('p', 0):.1f}"
+        f_  = f"{item.get('f', 0):.1f}"
+        c   = f"{item.get('c', 0):.1f}"
+        lines.append(
+            f"*{_esc(name)}:* {_esc(cal)} ккал "
+            f"\\| Б: {_esc(p)} \\| Ж: {_esc(f_)} \\| У: {_esc(c)}"
+        )
+
+    if len(items) > 1:
+        lines.append("ーーー")
+        lines.append(
+            f"*Итого за приём:* {_esc(f'{total_cal:.0f}')} ккал "
+            f"\\| Б: {_esc(f'{total_p:.1f}')} "
+            f"\\| Ж: {_esc(f'{total_f:.1f}')} "
+            f"\\| У: {_esc(f'{total_c:.1f}')}"
+        )
+
+    remaining = target - (eaten_before + total_cal)
+    lines.append(
+        f"\nОсталось сегодня: *{_esc(f'{remaining:.0f}')}* ккал из {_esc(str(target))}"
+    )
+    return "\n".join(lines)
+
+
+def _fmt_daily_log(foods: list[dict], target: int) -> str:
+    if not foods:
+        return "Рацион за сегодня пуст\\."
+
+    lines = ["*Рацион за сегодня:*\n"]
+    total_cal = total_p = total_f = total_c = 0.0
+
+    for item in foods:
+        total_cal += item.get("calories", 0)
+        total_p   += item.get("p", 0)
+        total_f   += item.get("f", 0)
+        total_c   += item.get("c", 0)
+        cal = f"{item.get('calories', 0):.0f}"
+        p   = f"{item.get('p', 0):.1f}"
+        f_  = f"{item.get('f', 0):.1f}"
+        c   = f"{item.get('c', 0):.1f}"
+        lines.append(
+            f"• {_esc(item['name'])}: {_esc(cal)} ккал "
+            f"\\| Б: {_esc(p)} \\| Ж: {_esc(f_)} \\| У: {_esc(c)}"
+        )
+
+    lines.append("ーーー")
+    lines.append(
+        f"*Итого за день:* {_esc(f'{total_cal:.0f}')} / {_esc(str(target))} ккал "
+        f"\\| Б: {_esc(f'{total_p:.1f}')} "
+        f"\\| Ж: {_esc(f'{total_f:.1f}')} "
+        f"\\| У: {_esc(f'{total_c:.1f}')}"
+    )
+    return "\n".join(lines)
+
 
 # ---------------------------------------------------------------------------
 # Вспомогательные функции
 # ---------------------------------------------------------------------------
 
-def _build_context(target: int, eaten: float) -> str:
+def _build_context(target: int, eaten: float, foods: list[dict]) -> str:
     now = datetime.now()
-    return (
-        f"Текущая дата: {now.strftime('%Y-%m-%d')}. "
+    ctx = (
+        f"Дата: {now.strftime('%Y-%m-%d')}. "
         f"Время: {now.strftime('%H:%M')}. "
-        f"Цель на день: {target} ккал. "
-        f"Уже съедено за сегодня: {eaten:.0f} ккал."
+        f"Цель: {target} ккал. "
+        f"Съедено сегодня: {eaten:.0f} ккал."
     )
+    if foods:
+        food_lines = "\n".join(
+            f"- {item['name']} ({item['calories']:.0f} ккал, "
+            f"Б:{item['p']:.1f} Ж:{item['f']:.1f} У:{item['c']:.1f})"
+            for item in foods
+        )
+        ctx += f"\n\nСписок рациона сегодня:\n{food_lines}"
+    return ctx
 
 
-async def _process_ai_response(message: Message, user_id: int, text: str, context: str):
+def _convert_audio(ogg_path: str, wav_path: str) -> None:
+    AudioSegment.from_ogg(ogg_path).export(wav_path, format="wav")
+
+
+def _do_recognize(wav_path: str) -> str:
+    recognizer = sr.Recognizer()
+    with sr.AudioFile(wav_path) as source:
+        audio_data = recognizer.record(source)
+    return recognizer.recognize_google(audio_data, language="ru-RU")
+
+
+async def _process_ai_response(
+    message: Message, user_id: int, text: str,
+    context: str, target: int, date_str: str,
+) -> None:
     result = await ask_gemini(text, context)
 
     action = result.get("action")
     data = result.get("data")
-    user_message = result.get("user_message", "Не удалось получить ответ от тренера.")
 
     if action == "log_food" and data:
-        date_str = datetime.now().strftime("%Y-%m-%d")
+        foods_before = get_today_foods(user_id, date_str)
+        eaten_before = sum(f.get("calories", 0) for f in foods_before)
         meal_type = data.get("meal_type", "Перекус")
         items = data.get("items", [])
         if items:
             log_food_to_db(user_id, date_str, meal_type, items)
+            await message.answer(
+                _fmt_food_items(items, target, eaten_before),
+                parse_mode="MarkdownV2",
+            )
+        return
 
+    if action == "delete_food" and data:
+        product_name = data.get("product_name", "")
+        if product_name:
+            delete_food_from_db(user_id, date_str, product_name)
+        foods = get_today_foods(user_id, date_str)
+        await message.answer(_fmt_daily_log(foods, target), parse_mode="MarkdownV2")
+        return
+
+    if action == "edit_food" and data:
+        old_name = data.get("old_name", "")
+        new_name = data.get("new_name", "")
+        if old_name and new_name:
+            update_food_in_db(
+                user_id, date_str, old_name, new_name,
+                data.get("calories", 0), data.get("p", 0),
+                data.get("f", 0), data.get("c", 0),
+            )
+        foods = get_today_foods(user_id, date_str)
+        await message.answer(_fmt_daily_log(foods, target), parse_mode="MarkdownV2")
+        return
+
+    if action == "change_weight" and data:
+        product_name = data.get("product_name", "")
+        if product_name:
+            update_food_in_db(
+                user_id, date_str, product_name, product_name,
+                data.get("calories", 0), data.get("p", 0),
+                data.get("f", 0), data.get("c", 0),
+            )
+        foods = get_today_foods(user_id, date_str)
+        await message.answer(_fmt_daily_log(foods, target), parse_mode="MarkdownV2")
+        return
+
+    user_message = result.get("user_message", "Не удалось получить ответ.")
     await message.answer(user_message)
 
 
@@ -77,6 +219,14 @@ async def start_handler(message: Message):
     )
 
 
+@dp.message(Command("clear_today"))
+async def clear_today_handler(message: Message):
+    user_id = message.from_user.id
+    date_str = datetime.now().strftime("%Y-%m-%d")
+    clear_today_foods(user_id, date_str)
+    await message.answer("🧹 Дневной рацион и калории за сегодня успешно сброшены.")
+
+
 @dp.message(F.voice)
 async def voice_handler(message: Message):
     user_id = message.from_user.id
@@ -84,8 +234,9 @@ async def voice_handler(message: Message):
     target = get_or_create_user(user_id, name)
 
     date_str = datetime.now().strftime("%Y-%m-%d")
-    eaten_today = get_today_calories(user_id, date_str)
-    context = _build_context(target, eaten_today)
+    foods = get_today_foods(user_id, date_str)
+    eaten_today = sum(f.get("calories", 0) for f in foods)
+    context = _build_context(target, eaten_today, foods)
 
     voice_file = await bot.get_file(message.voice.file_id)
     ogg_buffer = io.BytesIO()
@@ -100,14 +251,10 @@ async def voice_handler(message: Message):
             f.write(ogg_buffer.read())
 
         wav_tmp = ogg_tmp.replace(".ogg", ".wav")
-        AudioSegment.from_ogg(ogg_tmp).export(wav_tmp, format="wav")
-
-        recognizer = sr.Recognizer()
-        with sr.AudioFile(wav_tmp) as source:
-            audio_data = recognizer.record(source)
+        await asyncio.to_thread(_convert_audio, ogg_tmp, wav_tmp)
 
         try:
-            recognized_text = recognizer.recognize_google(audio_data, language="ru-RU")
+            recognized_text = await asyncio.to_thread(_do_recognize, wav_tmp)
         except sr.UnknownValueError:
             await message.answer(
                 "Не удалось распознать речь - попробуй ещё раз или напиши текстом."
@@ -123,7 +270,7 @@ async def voice_handler(message: Message):
             os.unlink(wav_tmp)
 
     try:
-        await _process_ai_response(message, user_id, recognized_text, context)
+        await _process_ai_response(message, user_id, recognized_text, context, target, date_str)
     except RuntimeError as e:
         await message.answer(f"Ошибка при обращении к ИИ: {e}")
 
@@ -135,11 +282,19 @@ async def text_handler(message: Message):
     target = get_or_create_user(user_id, name)
 
     date_str = datetime.now().strftime("%Y-%m-%d")
-    eaten_today = get_today_calories(user_id, date_str)
-    context = _build_context(target, eaten_today)
+    text_lower = message.text.lower()
+
+    if any(phrase in text_lower for phrase in _CLEAR_PHRASES):
+        clear_today_foods(user_id, date_str)
+        await message.answer("🧹 Дневной рацион и калории за сегодня успешно сброшены.")
+        return
+
+    foods = get_today_foods(user_id, date_str)
+    eaten_today = sum(f.get("calories", 0) for f in foods)
+    context = _build_context(target, eaten_today, foods)
 
     try:
-        await _process_ai_response(message, user_id, message.text, context)
+        await _process_ai_response(message, user_id, message.text, context, target, date_str)
     except RuntimeError as e:
         await message.answer(f"Ошибка при обращении к ИИ: {e}")
 
@@ -151,7 +306,14 @@ async def text_handler(message: Message):
 @dp.callback_query(F.data == "diary_today")
 async def cb_diary_today(callback: CallbackQuery):
     await callback.answer()
-    await callback.message.answer("📊 Функция в разработке - скоро здесь появится твой дневник за сегодня.")
+    user_id = callback.from_user.id
+    date_str = datetime.now().strftime("%Y-%m-%d")
+    target = get_or_create_user(user_id, callback.from_user.full_name or "друг")
+    foods = get_today_foods(user_id, date_str)
+    if foods:
+        await callback.message.answer(_fmt_daily_log(foods, target), parse_mode="MarkdownV2")
+    else:
+        await callback.message.answer("Сегодня записей о питании нет.")
 
 
 @dp.callback_query(F.data == "diary_week")
@@ -167,9 +329,7 @@ async def cb_ask_food(callback: CallbackQuery):
 
 
 # ---------------------------------------------------------------------------
-# Фоновый веб-сервер - нужен только для прохождения Port Binding на Render.
-# Render требует, чтобы процесс слушал порт в течение первых 5 минут.
-# Сам бот работает через Long Polling и этот сервер не использует.
+# Фоновый веб-сервер (Port Binding для Render)
 # ---------------------------------------------------------------------------
 
 PORT = int(os.environ.get("PORT", 10000))
@@ -186,9 +346,6 @@ async def handle_ping(request: web.Request) -> web.Response:
 async def main():
     init_db()
 
-    # ШАГ 1: сначала поднимаем веб-сервер и ГАРАНТИРОВАННО открываем порт.
-    # site.start() регистрирует сервер в event loop и сразу возвращает управление -
-    # он не блокирует. После этой строки порт уже слушается.
     app = web.Application()
     app.add_routes([web.get("/", handle_ping)])
     runner = web.AppRunner(app)
@@ -197,15 +354,9 @@ async def main():
     await site.start()
     print(f"Порт {PORT} открыт - Render может пройти проверку")
 
-    # ШАГ 2: сбрасываем все старые сессии Telegram перед стартом.
-    # Это устраняет TelegramConflictError - ошибку конфликта getUpdates,
-    # которая возникает если предыдущий процесс не завершился чисто.
-    # drop_pending_updates=True также сбрасывает накопившуюся очередь сообщений.
     await bot.delete_webhook(drop_pending_updates=True)
     print("Старые сессии сброшены")
 
-    # ШАГ 3: только после открытия порта и сброса сессий запускаем Long Polling.
-    # aiohttp-сервер продолжает работать в фоне того же event loop.
     print("Бот запущен в режиме Long Polling...")
     await dp.start_polling(bot)
 

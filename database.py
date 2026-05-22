@@ -78,3 +78,65 @@ def log_food_to_db(user_id: int, date_str: str, meal_type: str, items: list[dict
                 )
             )
         conn.commit()
+
+
+def get_today_foods(user_id: int, date_str: str) -> list[dict]:
+    with sqlite3.connect(DB_PATH) as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT id, meal_type, product_name, calories, proteins, fats, carbs "
+            "FROM nutrition_logs WHERE user_id = ? AND date = ? ORDER BY id",
+            (user_id, date_str),
+        )
+        rows = cursor.fetchall()
+        return [
+            {"id": r[0], "meal_type": r[1], "name": r[2],
+             "calories": r[3], "p": r[4], "f": r[5], "c": r[6]}
+            for r in rows
+        ]
+
+
+def delete_food_from_db(user_id: int, date_str: str, product_name: str) -> bool:
+    with sqlite3.connect(DB_PATH) as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """DELETE FROM nutrition_logs WHERE id = (
+                 SELECT id FROM nutrition_logs
+                 WHERE user_id = ? AND date = ? AND LOWER(product_name) LIKE LOWER(?)
+                 ORDER BY id DESC LIMIT 1
+               )""",
+            (user_id, date_str, f"%{product_name}%"),
+        )
+        conn.commit()
+        return cursor.rowcount > 0
+
+
+def update_food_in_db(
+    user_id: int, date_str: str,
+    old_name: str, new_name: str,
+    calories: float, p: float, f: float, c: float,
+) -> bool:
+    with sqlite3.connect(DB_PATH) as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """UPDATE nutrition_logs
+               SET product_name = ?, calories = ?, proteins = ?, fats = ?, carbs = ?
+               WHERE id = (
+                 SELECT id FROM nutrition_logs
+                 WHERE user_id = ? AND date = ? AND LOWER(product_name) LIKE LOWER(?)
+                 ORDER BY id DESC LIMIT 1
+               )""",
+            (new_name, calories, p, f, c, user_id, date_str, f"%{old_name}%"),
+        )
+        conn.commit()
+        return cursor.rowcount > 0
+
+
+def clear_today_foods(user_id: int, date_str: str) -> None:
+    with sqlite3.connect(DB_PATH) as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "DELETE FROM nutrition_logs WHERE user_id = ? AND date = ?",
+            (user_id, date_str),
+        )
+        conn.commit()
