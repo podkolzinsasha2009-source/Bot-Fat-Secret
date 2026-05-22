@@ -15,6 +15,9 @@ SYSTEM_PROMPT = """Возвращай ТОЛЬКО валидный JSON. Ник
 Без приветствий, пожеланий, вводных слов и советов по здоровью.
 Все числа (calories, p, f, c, burned_calories, weight, new_weight) — строго числовые значения JSON
 (целые или дробные: 4 или 4.0). Никаких единиц измерения, кавычек вокруг чисел и лишних символов.
+КРИТИЧНО: твой ответ всегда должен содержать РОВНО ОДИН корневой JSON-объект {}.
+Никогда не пиши несколько {} блоков подряд на верхнем уровне.
+Если нужно передать несколько изменений — вложи их внутрь одного объекта (в массив items или поле data).
 
 Определи тип запроса:
 - описание съеденной еды → type "food"
@@ -48,6 +51,42 @@ TYPE "question" — вопросы, советы, рекомендации
 # JSON extraction helpers
 # ---------------------------------------------------------------------------
 
+def _extract_first_object(text: str) -> str:
+    """Возвращает первый синтаксически полный {...} из строки.
+
+    Использует балансовый счётчик скобок с учётом строк и escaping,
+    поэтому корректно обрабатывает вложенные объекты и значения-строки
+    с { или } внутри. Это защита от сценария, когда модель выдаёт
+    два JSON-объекта подряд: {…}{…} → берём только первый.
+    """
+    start = text.find("{")
+    if start == -1:
+        return text
+    depth = 0
+    in_str = False
+    esc = False
+    for i, ch in enumerate(text[start:], start):
+        if esc:
+            esc = False
+            continue
+        if ch == "\\" and in_str:
+            esc = True
+            continue
+        if ch == '"':
+            in_str = not in_str
+            continue
+        if in_str:
+            continue
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start : i + 1]
+    # Скобки не сбалансированы — возвращаем всё от первой { (парсер разберётся)
+    return text[start:]
+
+
 def _clean_json_str(text: str) -> str:
     """Нормализует строку ответа модели к валидному JSON."""
     text = text.strip()
@@ -57,11 +96,10 @@ def _clean_json_str(text: str) -> str:
     text = re.sub(r"^```(?:json)?\s*", "", text)
     text = re.sub(r"\s*```$", "", text)
     text = text.strip()
-    # 3. Если вокруг JSON есть лишний текст — вырезаем первый {...}
-    start = text.find("{")
-    end   = text.rfind("}")
-    if start != -1 and end > start:
-        text = text[start : end + 1]
+    # 3. Извлекаем первый полный {...} — защита от склейки нескольких объектов
+    #    (rfind("}")  было бы неправильно: оно брало последнюю скобку и включало
+    #    весь мусор между двумя объектами)
+    text = _extract_first_object(text)
     # 4. Trailing comma перед } или ] — частая ошибка Gemini
     text = re.sub(r",\s*([}\]])", r"\1", text)
     # 5. Python-литералы → JSON
