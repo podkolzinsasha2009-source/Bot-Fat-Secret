@@ -6,7 +6,7 @@ import aiohttp
 
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
-MODEL = "qwen/qwen-3.6-plus"
+MODEL = "qwen/qwen-3-6-plus"
 
 SYSTEM_PROMPT = """/no_think
 Ты — нутрициолог-аналитик. Только сухие данные. Никаких подбадриваний, вводных фраз, мотивации, выводов.
