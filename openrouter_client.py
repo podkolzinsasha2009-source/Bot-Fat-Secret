@@ -7,11 +7,9 @@ from loguru import logger
 
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
-MODEL = "deepseek/deepseek-r1-distill-qwen-32b"
+MODEL = "google/gemini-2.5-flash"
 
-SYSTEM_PROMPT = """Ты — встроенный КБЖУ-калькулятор. Используй свои глубокие рассуждения и актуальные знания о составе продуктов для точного расчёта КБЖУ (Calorizator.ru, FatSecret, USDA и аналоги). Никакой отсебятины и выдуманных данных.
-
-ВАЖНО ДЛЯ ФОРМАТА ОТВЕТА: твои внутренние рассуждения в тегах <think>...</think> не должны попадать в итоговый ответ. После завершения мышления выдай ТОЛЬКО один валидный JSON-объект — без тегов, без пояснений, без текста вокруг.
+SYSTEM_PROMPT = """Ты — встроенный КБЖУ-калькулятор. Перед тем как рассчитать состав продукта, ты ОБЯЗАТЕЛЬНО должна использовать свой встроенный веб-поиск Google, чтобы найти точный и актуальный состав, калорийность, белки, жиры и углеводы этого продукта в сети (особенно если указан конкретный бренд). На выходе выдай строго один валидный JSON-объект без лишнего текста.
 
 ⚠️ КРИТИЧЕСКОЕ ПРАВИЛО ПЕРЕСЧЁТА ПОРЦИЙ:
 Все базы данных (Calorizator, FatSecret, USDA) указывают КБЖУ СТРОГО НА 100 ГРАММ продукта.
@@ -174,15 +172,13 @@ async def ask_gemini(user_text: str, context_info: str) -> dict:
             {"role": "user", "content": full_user_message},
         ],
     }
-    # DeepSeek R1 и другие reasoning-модели не поддерживают response_format json_object —
-    # они возвращают <think>...</think> перед JSON, что ломает режим принудительного формата.
-    # Наш пайплайн _clean_json_str (strip think-тегов) + _extract_first_object справляется.
-    # Для обычных моделей (OpenAI, Gemini) response_format помогает надёжности.
+    # Gemini поддерживает строгий JSON-режим — всегда включаем.
+    # Reasoning-модели (deepseek-r1, sonar) исключены: их <think>-теги ломают формат.
     _NO_JSON_FORMAT = ("deepseek-r1", "deepseek-r2", "sonar", "perplexity")
     if not any(tag in MODEL for tag in _NO_JSON_FORMAT):
         payload["response_format"] = {"type": "json_object"}
 
-    timeout = aiohttp.ClientTimeout(total=60)
+    timeout = aiohttp.ClientTimeout(total=30)
     async with aiohttp.ClientSession(timeout=timeout) as session:
         # ── Основной запрос ──────────────────────────────────────────────
         async with session.post(OPENROUTER_URL, headers=headers, json=payload) as response:
