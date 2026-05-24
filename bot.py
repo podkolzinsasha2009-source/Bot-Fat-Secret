@@ -8,17 +8,24 @@ from datetime import datetime
 import imageio_ffmpeg
 import speech_recognition as sr
 from aiohttp import web
+from loguru import logger
 from pydub import AudioSegment
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import (
+    CallbackQuery, Message,
+    InlineKeyboardButton, InlineKeyboardMarkup,
+)
 
 from database import (
     init_db, get_or_create_user, log_food_to_db,
-    get_today_foods, delete_food_from_db, update_food_in_db,
-    clear_today_foods, log_activity_to_db, get_today_burned,
+    get_today_foods, delete_food_from_db, delete_food_by_id,
+    update_food_in_db,
+    clear_today_foods, soft_delete_today, restore_today, hard_delete_soft_deleted,
+    log_activity_to_db, get_today_burned,
     clear_today_activity,
+    find_in_cache, upsert_cache,
 )
 from keyboards import get_main_menu, get_reply_menu
 from openrouter_client import ask_gemini
@@ -38,8 +45,19 @@ _CLEAR_PHRASES = [
 _STATS_PHRASES = ["📊 статистика за день", "статистика за день"]
 _WORKOUT_PHRASES = ["💪 добавить тренировку", "добавить тренировку"]
 
-# Norms
+# Нормы БЖУ
 _NORM_P, _NORM_F, _NORM_C = 140, 70, 210
+
+# Ключевые слова — признаки редактирования/вопроса (блокируют кэш)
+_EDIT_KEYWORDS = {
+    "измени", "исправь", "удали", "убери", "поменяй", "ошибка",
+    "вместо", "сколько", "можно", "совет", "вопрос", "не ",
+}
+# Паттерн для извлечения (продукт, вес) из простых сообщений
+_CACHE_RE = re.compile(
+    r'([А-ЯЁа-яёA-Za-z][А-ЯЁа-яёA-Za-z\s\-]*?)\s+(\d+(?:[.,]\d+)?)\s*г(?:рамм?|р\.?)?\b',
+    re.IGNORECASE,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -55,34 +73,30 @@ def _bar(current: float, total: float, length: int = 10) -> str:
     return "[" + "|" * filled + "." * (length - filled) + "]"
 
 
-# Keyword → emoji mapping для продуктов из БД (без сохранённого emoji)
+# ---------------------------------------------------------------------------
+# Emoji-маппинг продуктов
+# ---------------------------------------------------------------------------
+
 _EMOJI_MAP: list[tuple[list[str], str]] = [
-    # Птица
     (["курин", "цыплён", "окорочок", "грудк", "бедр", "крыл"], "🍗"),
-    # Мясо
     (["говядин", "телятин", "стейк", "бифштекс", "свинин", "карбонад", "фарш",
       "шашлык", "котлет"], "🥩"),
     (["сосис", "колбас", "сардел", "хот-дог", "хотдог"], "🌭"),
-    # Субпродукты
     (["печень", "почк", "сердц", "пупочк", "желудк"], "🫀"),
-    # Рыба / морепродукты
     (["рыб", "сёмг", "лосос", "форел", "тунец", "треск", "судак", "минтай",
       "горбуш", "скумбри", "сельд"], "🐟"),
     (["креветк", "кальмар", "краб", "морепродукт", "мидий"], "🦐"),
-    # Яйца / молочка
     (["яйц", "омлет", "глазунья"], "🥚"),
     (["молок", "кефир", "ряженк"], "🥛"),
-    (["творог", "йогурт", "сметан", "ряженк"], "🧴"),
+    (["творог", "йогурт", "сметан"], "🧴"),
     (["сыр"], "🧀"),
     (["масл", "маргарин"], "🧈"),
-    # Крупы / злаки
     (["гречк", "гречнев"], "🌾"),
     (["рис", "рисов"], "🍚"),
     (["овсянк", "овёс", "овсян", "геркулес"], "🥣"),
     (["макарон", "паста", "спагетти", "лапш", "феттучин"], "🍝"),
     (["хлеб", "батон", "багет", "буханк", "лаваш", "тост"], "🍞"),
     (["каш"], "🥣"),
-    # Картофель / овощи
     (["картофел", "картошк", "пюре"], "🥔"),
     (["помидор", "томат"], "🍅"),
     (["огурец", "огурц"], "🥒"),
@@ -94,7 +108,6 @@ _EMOJI_MAP: list[tuple[list[str], str]] = [
     (["салат", "шпинат", "зелен", "листов"], "🥗"),
     (["баклажан", "кабачок", "цукини"], "🍆"),
     (["свёкл", "свекл"], "🫚"),
-    # Фрукты
     (["яблок", "яблочн"], "🍎"),
     (["банан"], "🍌"),
     (["апельсин", "мандарин", "грейпфрут"], "🍊"),
@@ -106,37 +119,31 @@ _EMOJI_MAP: list[tuple[list[str], str]] = [
     (["ананас"], "🍍"),
     (["манго", "папайя"], "🥭"),
     (["авокадо"], "🥑"),
-    # Напитки
     (["чай"], "🍵"),
     (["кофе", "капучино", "латте", "эспрессо", "американо"], "☕"),
     (["сок", "нектар", "смузи"], "🧃"),
     (["вода"], "💧"),
     (["молочн коктейл"], "🥤"),
-    # Сладкое / выпечка
     (["шоколад", "конфет", "батончик"], "🍫"),
     (["торт", "пирог", "пирожн", "кекс"], "🎂"),
     (["печень", "бисквит", "крекер", "вафл", "пряник"], "🍪"),
     (["мороженое", "мороженн"], "🍦"),
     (["мёд", "мед"], "🍯"),
     (["варень", "джем"], "🍓"),
-    # Супы / готовые блюда
     (["суп", "борщ", "щи", "солянк", "рассольник", "окрошк"], "🍲"),
     (["пельмен", "вареник", "манты", "хинкал"], "🥟"),
     (["пицц"], "🍕"),
     (["бургер", "сэндвич", "бутерброд"], "🍔"),
     (["блин", "оладьи", "панкейк"], "🥞"),
     (["роллы", "суши"], "🍱"),
-    # Орехи / бобовые
     (["орех", "миндаль", "грецк", "кешью", "фундук", "фисташк"], "🥜"),
     (["горох", "фасоль", "чечевиц", "нут", "боб"], "🫘"),
-    # Масла (уточнение после "масл" выше)
     (["оливк", "подсолнечн", "растительн"], "🫒"),
 ]
 _DEFAULT_FOOD_EMOJI = "🍽"
 
 
 def _pick_emoji(name: str) -> str:
-    """Подбирает эмодзи по ключевым словам в названии продукта."""
     nl = name.lower()
     for keywords, emoji in _EMOJI_MAP:
         if any(kw in nl for kw in keywords):
@@ -144,17 +151,92 @@ def _pick_emoji(name: str) -> str:
     return _DEFAULT_FOOD_EMOJI
 
 
+# ---------------------------------------------------------------------------
+# Кэш: попытка обойти AI для известных продуктов
+# ---------------------------------------------------------------------------
+
+def _meal_type_by_time() -> str:
+    hour = datetime.now().hour
+    if hour < 11:
+        return "Завтрак"
+    if hour < 15:
+        return "Обед"
+    if hour < 19:
+        return "Полдник"
+    return "Ужин"
+
+
+def _try_from_cache(user_text: str):
+    """
+    Пробует взять КБЖУ из локального кэша, не вызывая AI.
+    Возвращает (meal_type, items) или None если кэш-мисс.
+    """
+    text_lower = user_text.lower()
+    if any(kw in text_lower for kw in _EDIT_KEYWORDS):
+        return None
+
+    matches = _CACHE_RE.findall(user_text)
+    if not matches:
+        return None
+
+    items = []
+    for raw_name, raw_weight in matches:
+        name = raw_name.strip()
+        weight = float(raw_weight.replace(",", "."))
+        cached = find_in_cache(name)
+        if not cached:
+            return None  # Хотя бы один продукт не в кэше → идём к AI
+        factor = weight / 100.0
+        items.append({
+            "name": cached["name"],
+            "emoji": _pick_emoji(cached["name"]),
+            "weight": weight,
+            "calories": round(cached["calories_100g"] * factor, 1),
+            "p": round(cached["p_100g"] * factor, 1),
+            "f": round(cached["f_100g"] * factor, 1),
+            "c": round(cached["c_100g"] * factor, 1),
+        })
+
+    if not items:
+        return None
+    return _meal_type_by_time(), items
+
+
+# ---------------------------------------------------------------------------
+# UI: клавиатура с кнопками удаления
+# ---------------------------------------------------------------------------
+
+def _build_delete_keyboard(foods: list[dict]) -> InlineKeyboardMarkup:
+    """Инлайн-клавиатура: кнопка ❌ на каждый продукт + очистка дня."""
+    buttons = [
+        [InlineKeyboardButton(
+            text=f"❌ {f['name']}",
+            callback_data=f"del_food:{f['id']}",
+        )]
+        for f in foods
+    ]
+    buttons.append([
+        InlineKeyboardButton(text="🧹 Очистить день", callback_data="clear_day"),
+    ])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+# ---------------------------------------------------------------------------
+# Форматирование сообщений
+# ---------------------------------------------------------------------------
+
 def _fmt_food_items(items: list[dict], target: int, eaten_before: float) -> str:
-    lines = []
+    """Форматирует только что добавленные продукты (ответ на log_food)."""
     total_cal = sum(i.get("calories", 0) for i in items)
     total_p   = sum(i.get("p", 0) for i in items)
     total_f   = sum(i.get("f", 0) for i in items)
     total_c   = sum(i.get("c", 0) for i in items)
 
+    lines = []
     for item in items:
         emoji  = item.get("emoji", "🍽")
         weight = item.get("weight", 0)
-        name   = item.get("name", "") + (f" ({weight}г)" if weight else "")
+        name   = item.get("name", "") + (f" ({int(weight)}г)" if weight else "")
         cal    = f"{item.get('calories', 0):.0f}"
         p      = f"{item.get('p', 0):.1f}"
         f_     = f"{item.get('f', 0):.1f}"
@@ -181,6 +263,7 @@ def _fmt_food_items(items: list[dict], target: int, eaten_before: float) -> str:
 
 
 def _fmt_daily_log(foods: list[dict], target: int) -> str:
+    """Форматирует полный список продуктов за день."""
     if not foods:
         return "Рацион за сегодня пуст\\."
 
@@ -192,8 +275,8 @@ def _fmt_daily_log(foods: list[dict], target: int) -> str:
         total_p   += item.get("p", 0)
         total_f   += item.get("f", 0)
         total_c   += item.get("c", 0)
-        emoji  = _pick_emoji(item.get("name", ""))
-        weight = item.get("weight") or 0
+        emoji       = _pick_emoji(item.get("name", ""))
+        weight      = item.get("weight") or 0
         weight_part = f" \\({_esc(str(int(weight)))}г\\)" if weight > 0 else ""
         cal = f"{item.get('calories', 0):.0f}"
         p   = f"{item.get('p', 0):.1f}"
@@ -273,7 +356,11 @@ async def _send_stats(message: Message, user_id: int, target: int, date_str: str
         f"🍞 Углеводы: *{_esc(f'{total_c:.1f}')}* / {_esc(str(_NORM_C))} г "
         f"{_esc(_bar(total_c, _NORM_C))}"
     )
-    await message.answer(text, parse_mode="MarkdownV2")
+    # Кнопка перехода к рациону с удалением
+    kb = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="📋 Рацион / удалить блюда", callback_data="diary_today"),
+    ]])
+    await message.answer(text, parse_mode="MarkdownV2", reply_markup=kb)
 
 
 async def _process_ai_response(
@@ -281,13 +368,12 @@ async def _process_ai_response(
     context: str, target: int, date_str: str,
 ) -> None:
     result = await ask_gemini(text, context)
+    logger.info("user={} AI response type={} action={}", user_id, result.get("type"), result.get("action"))
 
-    # Support both new type-field format and legacy action-only format
     type_  = result.get("type", "")
     action = result.get("action", "")
     data   = result.get("data")
 
-    # Backward compat: no type but has action → treat as food
     if not type_ and action:
         type_ = "food"
 
@@ -300,9 +386,16 @@ async def _process_ai_response(
             items        = data.get("items", [])
             if items:
                 log_food_to_db(user_id, date_str, meal_type, items)
+                upsert_cache(items)  # сохраняем в кэш для будущих запросов
+                logger.info("user={} logged {} items via AI, cached", user_id, len(items))
+                # Кнопка перехода к полному рациону с удалением
+                kb = InlineKeyboardMarkup(inline_keyboard=[[
+                    InlineKeyboardButton(text="📋 Рацион / удалить блюда", callback_data="diary_today"),
+                ]])
                 await message.answer(
                     _fmt_food_items(items, target, eaten_before),
                     parse_mode="MarkdownV2",
+                    reply_markup=kb,
                 )
             return
 
@@ -311,7 +404,12 @@ async def _process_ai_response(
             if product_name:
                 delete_food_from_db(user_id, date_str, product_name)
             foods = get_today_foods(user_id, date_str)
-            await message.answer(_fmt_daily_log(foods, target), parse_mode="MarkdownV2")
+            kb = _build_delete_keyboard(foods) if foods else None
+            await message.answer(
+                _fmt_daily_log(foods, target),
+                parse_mode="MarkdownV2",
+                reply_markup=kb,
+            )
             return
 
         if action == "edit_food" and data:
@@ -324,7 +422,12 @@ async def _process_ai_response(
                     data.get("f", 0), data.get("c", 0),
                 )
             foods = get_today_foods(user_id, date_str)
-            await message.answer(_fmt_daily_log(foods, target), parse_mode="MarkdownV2")
+            kb = _build_delete_keyboard(foods) if foods else None
+            await message.answer(
+                _fmt_daily_log(foods, target),
+                parse_mode="MarkdownV2",
+                reply_markup=kb,
+            )
             return
 
         if action == "change_weight" and data:
@@ -337,7 +440,12 @@ async def _process_ai_response(
                     weight=data.get("new_weight", 0),
                 )
             foods = get_today_foods(user_id, date_str)
-            await message.answer(_fmt_daily_log(foods, target), parse_mode="MarkdownV2")
+            kb = _build_delete_keyboard(foods) if foods else None
+            await message.answer(
+                _fmt_daily_log(foods, target),
+                parse_mode="MarkdownV2",
+                reply_markup=kb,
+            )
             return
 
     # ── ACTIVITY ──────────────────────────────────────────────────────────
@@ -346,6 +454,7 @@ async def _process_ai_response(
         description = result.get("description", "")
         if burned > 0:
             log_activity_to_db(user_id, date_str, description, burned)
+            logger.info("user={} logged activity: {} kcal ({})", user_id, burned, description)
         desc_part = f" — {_esc(description)}" if description else ""
         await message.answer(
             f"💪 *Сгорело {_esc(f'{burned:.0f}')} ккал*{desc_part}\\.\n"
@@ -374,6 +483,7 @@ async def start_handler(message: Message):
     user_id = message.from_user.id
     name    = message.from_user.full_name or "друг"
     target  = get_or_create_user(user_id, name)
+    logger.info("user={} /start name={}", user_id, name)
     await message.answer(
         f"Привет, {name}! 👋 Я твой персональный ИИ-тренер и умный дневник питания.\n\n"
         f"📊 Твоя дневная норма — {target} ккал.\n\n"
@@ -406,6 +516,7 @@ async def clear_today_handler(message: Message):
     date_str = datetime.now().strftime("%Y-%m-%d")
     clear_today_foods(user_id, date_str)
     clear_today_activity(user_id, date_str)
+    logger.info("user={} /clear_today", user_id)
     await message.answer("🧹 Дневной рацион и калории за сегодня успешно сброшены.")
 
 
@@ -449,9 +560,30 @@ async def voice_handler(message: Message):
         if wav_tmp and os.path.exists(wav_tmp):
             os.unlink(wav_tmp)
 
+    logger.info("user={} voice recognized: {!r}", user_id, recognized_text)
+
+    # Пробуем кэш перед AI
+    cache_result = _try_from_cache(recognized_text)
+    if cache_result:
+        meal_type, items = cache_result
+        foods_before = get_today_foods(user_id, date_str)
+        eaten_before = sum(f.get("calories", 0) for f in foods_before)
+        log_food_to_db(user_id, date_str, meal_type, items)
+        logger.info("user={} cache HIT for voice: {}", user_id, [i["name"] for i in items])
+        kb = InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="📋 Рацион / удалить блюда", callback_data="diary_today"),
+        ]])
+        await message.answer(
+            _fmt_food_items(items, target, eaten_before),
+            parse_mode="MarkdownV2",
+            reply_markup=kb,
+        )
+        return
+
     try:
         await _process_ai_response(message, user_id, recognized_text, context, target, date_str)
     except RuntimeError as e:
+        logger.error("user={} AI error: {}", user_id, e)
         await message.answer(f"Ошибка при обращении к ИИ: {e}")
 
 
@@ -480,7 +612,28 @@ async def text_handler(message: Message):
     if any(phrase in text_lower for phrase in _CLEAR_PHRASES):
         clear_today_foods(user_id, date_str)
         clear_today_activity(user_id, date_str)
+        logger.info("user={} clear via phrase", user_id)
         await message.answer("🧹 Дневной рацион и калории за сегодня успешно сброшены.")
+        return
+
+    logger.info("user={} text: {!r}", user_id, message.text[:80])
+
+    # Пробуем кэш перед AI
+    cache_result = _try_from_cache(message.text)
+    if cache_result:
+        meal_type, items = cache_result
+        foods_before = get_today_foods(user_id, date_str)
+        eaten_before = sum(f.get("calories", 0) for f in foods_before)
+        log_food_to_db(user_id, date_str, meal_type, items)
+        logger.info("user={} cache HIT: {}", user_id, [i["name"] for i in items])
+        kb = InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="📋 Рацион / удалить блюда", callback_data="diary_today"),
+        ]])
+        await message.answer(
+            _fmt_food_items(items, target, eaten_before),
+            parse_mode="MarkdownV2",
+            reply_markup=kb,
+        )
         return
 
     foods       = get_today_foods(user_id, date_str)
@@ -491,11 +644,12 @@ async def text_handler(message: Message):
     try:
         await _process_ai_response(message, user_id, message.text, context, target, date_str)
     except RuntimeError as e:
+        logger.error("user={} AI error: {}", user_id, e)
         await message.answer(f"Ошибка при обращении к ИИ: {e}")
 
 
 # ---------------------------------------------------------------------------
-# Обработчики inline-кнопок меню
+# Inline-callbacks: рацион и удаление
 # ---------------------------------------------------------------------------
 
 @dp.callback_query(F.data == "diary_today")
@@ -506,10 +660,86 @@ async def cb_diary_today(callback: CallbackQuery):
     target   = get_or_create_user(user_id, callback.from_user.full_name or "друг")
     foods    = get_today_foods(user_id, date_str)
     if foods:
-        await callback.message.answer(_fmt_daily_log(foods, target), parse_mode="MarkdownV2")
+        await callback.message.answer(
+            _fmt_daily_log(foods, target),
+            parse_mode="MarkdownV2",
+            reply_markup=_build_delete_keyboard(foods),
+        )
     else:
         await callback.message.answer("Сегодня записей о питании нет.")
 
+
+@dp.callback_query(F.data.startswith("del_food:"))
+async def cb_delete_food(callback: CallbackQuery):
+    food_id  = int(callback.data.split(":")[1])
+    user_id  = callback.from_user.id
+    date_str = datetime.now().strftime("%Y-%m-%d")
+    target   = get_or_create_user(user_id, callback.from_user.full_name or "друг")
+    delete_food_by_id(food_id)
+    logger.info("user={} deleted food id={}", user_id, food_id)
+    foods = get_today_foods(user_id, date_str)
+    if foods:
+        await callback.message.edit_text(
+            _fmt_daily_log(foods, target),
+            parse_mode="MarkdownV2",
+            reply_markup=_build_delete_keyboard(foods),
+        )
+    else:
+        await callback.message.edit_text("Рацион за сегодня пуст\\.", parse_mode="MarkdownV2")
+    await callback.answer("Удалено ✓")
+
+
+# ---------------------------------------------------------------------------
+# Inline-callbacks: мягкое удаление с возможностью восстановления
+# ---------------------------------------------------------------------------
+
+@dp.callback_query(F.data == "clear_day")
+async def cb_clear_day(callback: CallbackQuery):
+    user_id  = callback.from_user.id
+    date_str = datetime.now().strftime("%Y-%m-%d")
+    count    = soft_delete_today(user_id, date_str)
+    logger.info("user={} soft-deleted {} entries for {}", user_id, count, date_str)
+    kb = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="↩️ Восстановить данные", callback_data="restore_day"),
+        InlineKeyboardButton(text="🗑️ Оставить как есть",  callback_data="confirm_clear"),
+    ]])
+    await callback.message.edit_text(
+        "🧹 Лог за сегодня очищен\\!\n\nВосстановить записи?",
+        parse_mode="MarkdownV2",
+        reply_markup=kb,
+    )
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "restore_day")
+async def cb_restore_day(callback: CallbackQuery):
+    user_id  = callback.from_user.id
+    date_str = datetime.now().strftime("%Y-%m-%d")
+    count    = restore_today(user_id, date_str)
+    target   = get_or_create_user(user_id, callback.from_user.full_name or "друг")
+    foods    = get_today_foods(user_id, date_str)
+    logger.info("user={} restored {} entries for {}", user_id, count, date_str)
+    await callback.message.edit_text(
+        _fmt_daily_log(foods, target),
+        parse_mode="MarkdownV2",
+        reply_markup=_build_delete_keyboard(foods) if foods else None,
+    )
+    await callback.answer("↩️ Данные восстановлены")
+
+
+@dp.callback_query(F.data == "confirm_clear")
+async def cb_confirm_clear(callback: CallbackQuery):
+    user_id  = callback.from_user.id
+    date_str = datetime.now().strftime("%Y-%m-%d")
+    hard_delete_soft_deleted(user_id, date_str)
+    logger.info("user={} permanently cleared {}", user_id, date_str)
+    await callback.message.edit_text("🗑️ Данные за сегодня удалены\\.", parse_mode="MarkdownV2")
+    await callback.answer()
+
+
+# ---------------------------------------------------------------------------
+# Прочие inline-callbacks меню
+# ---------------------------------------------------------------------------
 
 @dp.callback_query(F.data == "diary_week")
 async def cb_diary_week(callback: CallbackQuery):
@@ -540,6 +770,7 @@ async def handle_ping(request: web.Request) -> web.Response:
 
 async def main():
     init_db()
+    logger.info("DB initialized")
 
     app = web.Application()
     app.add_routes([web.get("/", handle_ping)])
@@ -547,12 +778,11 @@ async def main():
     await runner.setup()
     site = web.TCPSite(runner, host="0.0.0.0", port=PORT)
     await site.start()
-    print(f"Порт {PORT} открыт — Render может пройти проверку")
+    logger.info("Web server started on port {}", PORT)
 
     await bot.delete_webhook(drop_pending_updates=True)
-    print("Старые сессии сброшены")
+    logger.info("Webhook cleared, starting polling...")
 
-    print("Бот запущен в режиме Long Polling...")
     await dp.start_polling(bot)
 
 

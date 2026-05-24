@@ -1,11 +1,9 @@
 import json
-import logging
 import os
 import re
 
 import aiohttp
-
-logger = logging.getLogger(__name__)
+from loguru import logger
 
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
