@@ -9,7 +9,7 @@ OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 MODEL = "google/gemini-2.5-flash"
 
-SYSTEM_PROMPT = """Ты — встроенный КБЖУ-калькулятор. Для каждого запроса ты ОБЯЗАТЕЛЬНО должна использовать подключенный плагин web-search, чтобы найти в Google реальный, актуальный состав продукта или блюда (особенно если указан бренд). Пересчитывай КБЖУ строго под указанный пользователем вес порции по формуле (weight / 100). На выходе выдай строго один валидный JSON-объект без какого-либо лишнего текста.
+SYSTEM_PROMPT = """Ты — встроенный КБЖУ-калькулятор. Используй свои актуальные знания и встроенные возможности поиска для точного расчёта КБЖУ под указанный вес (weight / 100). Ответ дай строго в формате JSON.
 
 ⚠️ КРИТИЧЕСКОЕ ПРАВИЛО ПЕРЕСЧЁТА ПОРЦИЙ:
 Все базы данных (Calorizator, FatSecret, USDA) указывают КБЖУ СТРОГО НА 100 ГРАММ продукта.
@@ -171,9 +171,7 @@ async def ask_gemini(user_text: str, context_info: str) -> dict:
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": full_user_message},
         ],
-        # Google Gemini поддерживает web-search плагин и json_object одновременно
         "response_format": {"type": "json_object"},
-        "plugins": [{"id": "web-search"}],
     }
 
     timeout = aiohttp.ClientTimeout(total=30)
