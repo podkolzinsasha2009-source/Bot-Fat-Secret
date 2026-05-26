@@ -1,0 +1,30 @@
+services:
+  - type: web
+    name: fatsecret-bot
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python bot.py
+    envVars:
+      - key: BOT_TOKEN
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GROQ_API_KEY
+        sync: false
+      - key: GITHUB_TOKEN
+        sync: false
+      - key: OBSIDIAN_REPO
+        value: podkolzinsasha2009-source/baza-znanii
+      - key: OBSIDIAN_BRANCH
+        value: main
+      - key: DB_FILE
+        value: "wiki/areas/спорт/база-продуктов.md"
+      - key: DAILY_PROTEIN
+        value: "140"
+      - key: DAILY_FAT
+        value: "80"
+      - key: DAILY_CARBS
+        value: "220"
+      - key: PORT
+        value: "10000"
