@@ -124,29 +124,28 @@ def _clean_json(text: str) -> str:
     text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
     text = re.sub(r"^```(?:json)?\s*", "", text)
     text = re.sub(r"\s*```$", "", text)
-    start = text.find("{")
+    
+    start_brace = text.find("{")
+    start_bracket = text.find("[")
+    
+    start = -1
+    end_char = ""
+    if start_brace != -1 and (start_bracket == -1 or start_brace < start_bracket):
+        start = start_brace
+        end_char = "}"
+    elif start_bracket != -1:
+        start = start_bracket
+        end_char = "]"
+        
     if start == -1:
         return text
-    depth, in_str, esc = 0, False, False
-    for i, ch in enumerate(text[start:], start):
-        if esc:
-            esc = False
-            continue
-        if ch == "\\" and in_str:
-            esc = True
-            continue
-        if ch == '"':
-            in_str = not in_str
-            continue
-        if in_str:
-            continue
-        if ch == "{":
-            depth += 1
-        elif ch == "}":
-            depth -= 1
-            if depth == 0:
-                text = text[start:i + 1]
-                break
+        
+    end = text.rfind(end_char)
+    if end != -1:
+        text = text[start:end+1]
+    else:
+        text = text[start:]
+        
     text = re.sub(r",\s*([}\]])", r"\1", text)
     text = re.sub(r"\bTrue\b",  "true",  text)
     text = re.sub(r"\bFalse\b", "false", text)
