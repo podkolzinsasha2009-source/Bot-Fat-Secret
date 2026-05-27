@@ -48,6 +48,17 @@ _NORM_P, _NORM_F, _NORM_C = (
     int(os.environ.get("DAILY_CARBS", 220)),
 )
 
+# ── Приёмы пищи ───────────────────────────────────────────────────────────────
+
+_MEAL_ORDER = ["Завтрак", "Обед", "Полдник", "Ужин", "Перекус"]
+_MEAL_ICONS = {
+    "Завтрак": "🌅",
+    "Обед":    "☀️",
+    "Полдник": "🌤",
+    "Ужин":    "🌙",
+    "Перекус": "🍎",
+}
+
 # ── Emoji-маппинг ─────────────────────────────────────────────────────────────
 
 _EMOJI_MAP: list[tuple[list[str], str]] = [
@@ -97,7 +108,7 @@ _EMOJI_MAP: list[tuple[list[str], str]] = [
     (["вода"], "💧"),
     (["шоколад", "конфет", "батончик"], "🍫"),
     (["торт", "пирог", "пирожн", "кекс"], "🎂"),
-    (["бисквит", "крекер", "вафл", "пряник", "печень"], "🍪"),
+    (["бисквит", "крекер", "вафл", "пряник"], "🍪"),
     (["мороженое"], "🍦"),
     (["мёд", "мед"], "🍯"),
     (["варень", "джем"], "🍓"),
@@ -129,8 +140,13 @@ def _esc(text) -> str:
 
 
 def _bar(current: float, total: float, length: int = 10) -> str:
+    """Прогресс-бар: █░"""
     filled = int(length * min(current, total) / total) if total > 0 else 0
-    return "[" + "|" * filled + "." * (length - filled) + "]"
+    return "█" * filled + "░" * (length - filled)
+
+
+def _pct(current: float, total: float) -> int:
+    return min(int(current / total * 100), 100) if total > 0 else 0
 
 
 # ── Определение времени приёма пищи ──────────────────────────────────────────
@@ -165,10 +181,6 @@ def _build_context(target: int, eaten: float, burned: float, foods: list[dict]) 
 # ── Разрешение продуктов: Obsidian DB → Gemini estimate ──────────────────────
 
 async def _resolve_items(raw_items: list[dict]) -> list[dict]:
-    """
-    Для каждого {name, weight} ищет КБЖУ в базе, при необходимости — оценивает Gemini.
-    Авто-добавляет неизвестные продукты в базу.
-    """
     resolved = []
     for item in raw_items:
         name   = item.get("name", "неизвестный продукт")
@@ -176,10 +188,10 @@ async def _resolve_items(raw_items: list[dict]) -> list[dict]:
 
         found = food_db.search(name, weight)
         if found:
-            found["emoji"] = _pick_emoji(found["name"])
+            found["emoji"]   = _pick_emoji(found["name"])
+            found["from_db"] = True
             resolved.append(found)
         else:
-            # Gemini оценивает КБЖУ/100г
             nutrition = await gemini_service.estimate_nutrition(name)
             factor = weight / 100.0
             entry = {
@@ -193,7 +205,6 @@ async def _resolve_items(raw_items: list[dict]) -> list[dict]:
                 "from_db":  False,
             }
             resolved.append(entry)
-            # Авто-обучение: дописать в базу
             food_db.append_product(
                 name,
                 nutrition["calories"], nutrition["protein"],
@@ -204,81 +215,152 @@ async def _resolve_items(raw_items: list[dict]) -> list[dict]:
     return resolved
 
 
-# ── Форматирование сообщений ──────────────────────────────────────────────────
+# ── FatSecret-style форматирование ────────────────────────────────────────────
 
-def _fmt_food_items(items: list[dict], target: int, eaten_before: float) -> str:
-    total_cal = sum(i.get("calories", 0) for i in items)
-    total_p   = sum(i.get("p", 0) for i in items)
-    total_f   = sum(i.get("f", 0) for i in items)
-    total_c   = sum(i.get("c", 0) for i in items)
+def _fmt_day_header(target: int, total_cal: float, total_p: float,
+                    total_f: float, total_c: float, burned: float) -> list[str]:
+    """Шапка дня: дата + калории + макросы с прогресс-барами."""
+    now = datetime.now()
+    day_names   = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
+    month_names = ["янв","фев","мар","апр","май","июн",
+                   "июл","авг","сен","окт","ноя","дек"]
+    date_label = f"{day_names[now.weekday()]}, {now.day} {month_names[now.month - 1]}"
+
+    net       = total_cal - burned
+    remaining = target - net
+    cal_pct   = _pct(total_cal, target)
+
+    lines = [
+        f"📅 *{_esc(date_label)}*",
+        "",
+        "📊 *Калории*",
+        f"🔥 *{_esc(f'{total_cal:.0f}')}* / {_esc(str(target))} ккал",
+        f"`{_bar(total_cal, target, 14)}` {_esc(str(cal_pct))}%",
+    ]
+
+    if remaining >= 0:
+        lines.append(f"Осталось: *{_esc(f'{remaining:.0f}')}* ккал")
+    else:
+        lines.append(f"⚠️ Превышение: *{_esc(f'{abs(remaining):.0f}')}* ккал")
+
+    if burned > 0:
+        lines.append(f"💪 Сожжено: {_esc(f'{burned:.0f}')} ккал")
+
+    lines += [
+        "",
+        "🧬 *Макросы*",
+        f"🥩 Белки:    *{_esc(f'{total_p:.1f}')}* / {_esc(str(_NORM_P))} г  "
+        f"`{_bar(total_p, _NORM_P, 10)}` {_esc(str(_pct(total_p, _NORM_P)))}%",
+        f"🥑 Жиры:     *{_esc(f'{total_f:.1f}')}* / {_esc(str(_NORM_F))} г  "
+        f"`{_bar(total_f, _NORM_F, 10)}` {_esc(str(_pct(total_f, _NORM_F)))}%",
+        f"🍞 Углеводы: *{_esc(f'{total_c:.1f}')}* / {_esc(str(_NORM_C))} г  "
+        f"`{_bar(total_c, _NORM_C, 10)}` {_esc(str(_pct(total_c, _NORM_C)))}%",
+    ]
+    return lines
+
+
+def _fmt_meals_section(foods: list[dict]) -> list[str]:
+    """Блок с приёмами пищи, сгруппированными по типу."""
+    if not foods:
+        return ["", "_Рацион пуст — расскажи что съел\\!_"]
+
+    # Группировка
+    by_meal: dict[str, list[dict]] = {}
+    for f in foods:
+        mt = f.get("meal_type") or "Перекус"
+        by_meal.setdefault(mt, []).append(f)
+
+    ordered = [m for m in _MEAL_ORDER if m in by_meal]
+    ordered += [m for m in by_meal if m not in _MEAL_ORDER]
 
     lines = []
-    for item in items:
-        emoji  = item.get("emoji", _DEFAULT_EMOJI)
-        weight = item.get("weight", 0)
-        name   = item.get("name", "")
-        src    = "" if item.get("from_db", True) else " _\\(оценка ИИ\\)_"
-        label  = _esc(f"{name} ({int(weight)}г)") if weight else _esc(name)
-        cal = _esc(f"{item.get('calories', 0):.0f}")
-        p_  = _esc(f"{item.get('p', 0):.1f}")
-        f_  = _esc(f"{item.get('f', 0):.1f}")
-        c_  = _esc(f"{item.get('c', 0):.1f}")
-        lines.append(
-            f"{emoji} *{label}*{src}: {cal} ккал "
-            f"\\| Б: {p_} \\| Ж: {f_} \\| У: {c_}"
-        )
+    for meal in ordered:
+        items    = by_meal[meal]
+        meal_cal = sum(i.get("calories", 0) for i in items)
+        meal_p   = sum(i.get("p", 0) for i in items)
+        meal_f   = sum(i.get("f", 0) for i in items)
+        meal_c   = sum(i.get("c", 0) for i in items)
+        icon     = _MEAL_ICONS.get(meal, "🍽")
 
-    if len(items) > 1:
-        lines.append("ーーー")
+        lines.append("")
         lines.append(
-            f"📊 *Итого за приём:* {_esc(f'{total_cal:.0f}')} ккал "
-            f"\\| Б: {_esc(f'{total_p:.1f}')} "
-            f"\\| Ж: {_esc(f'{total_f:.1f}')} "
-            f"\\| У: {_esc(f'{total_c:.1f}')}"
+            f"{icon} *{_esc(meal)}*  —  "
+            f"{_esc(f'{meal_cal:.0f}')} ккал "
+            f"\\| Б:{_esc(f'{meal_p:.1f}')} "
+            f"Ж:{_esc(f'{meal_f:.1f}')} "
+            f"У:{_esc(f'{meal_c:.1f}')}"
         )
+        lines.append("┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄")
+        for item in items:
+            emoji  = _pick_emoji(item.get("name", ""))
+            name   = _esc(item.get("name", ""))
+            weight = item.get("weight") or 0
+            cal    = _esc(f"{item.get('calories', 0):.0f}")
+            p_     = _esc(f"{item.get('p', 0):.1f}")
+            f_     = _esc(f"{item.get('f', 0):.1f}")
+            c_     = _esc(f"{item.get('c', 0):.1f}")
+            w_part = f" {_esc(str(int(weight)))}г" if weight > 0 else ""
+            ai_tag = " _\\(ИИ\\)_" if not item.get("from_db", True) else ""
+            lines.append(
+                f"  {emoji} *{name}*{w_part}{ai_tag}\n"
+                f"       {cal} ккал  Б:{p_}  Ж:{f_}  У:{c_}"
+            )
 
-    remaining = target - (eaten_before + total_cal)
-    sign = "\\+" if remaining < 0 else ""
-    remain_str = f"{sign}{_esc(f'{abs(remaining):.0f}')}"
-    lines.append(
-        f"\nОсталось сегодня: *{remain_str}* ккал из {_esc(str(target))}"
-        if remaining >= 0 else
-        f"\nПревышение: *{_esc(f'{abs(remaining):.0f}')}* ккал \\(лимит {_esc(str(target))}\\)"
-    )
+    return lines
+
+
+def _fmt_full_day(foods: list[dict], target: int, burned: float = 0.0) -> str:
+    """Полный FatSecret-дашборд: шапка + приёмы пищи."""
+    total_cal = sum(f.get("calories", 0) for f in foods)
+    total_p   = sum(f.get("p", 0) for f in foods)
+    total_f   = sum(f.get("f", 0) for f in foods)
+    total_c   = sum(f.get("c", 0) for f in foods)
+
+    lines  = _fmt_day_header(target, total_cal, total_p, total_f, total_c, burned)
+    lines += _fmt_meals_section(foods)
     return "\n".join(lines)
 
 
-def _fmt_daily_log(foods: list[dict], target: int) -> str:
-    if not foods:
-        return "Рацион за сегодня пуст\\."
+def _fmt_log_confirm(items: list[dict], meal_type: str,
+                     target: int, eaten_before: float) -> str:
+    """Подтверждение после записи еды: что добавлено + мини-итог дня."""
+    added_cal = sum(i.get("calories", 0) for i in items)
+    added_p   = sum(i.get("p", 0) for i in items)
+    added_f   = sum(i.get("f", 0) for i in items)
+    added_c   = sum(i.get("c", 0) for i in items)
 
-    lines = ["*Рацион за сегодня:*\n"]
-    total_cal = total_p = total_f = total_c = 0.0
+    icon = _MEAL_ICONS.get(meal_type, "🍽")
+    lines = [f"✅ *Записано в {_esc(meal_type)}* {icon}", ""]
 
-    for item in foods:
-        total_cal += item.get("calories", 0)
-        total_p   += item.get("p", 0)
-        total_f   += item.get("f", 0)
-        total_c   += item.get("c", 0)
-        emoji      = _pick_emoji(item.get("name", ""))
-        weight     = item.get("weight") or 0
-        w_part     = f" \\({_esc(str(int(weight)))}г\\)" if weight > 0 else ""
-        cal = _esc(f"{item.get('calories', 0):.0f}")
-        p_  = _esc(f"{item.get('p', 0):.1f}")
-        f_v = _esc(f"{item.get('f', 0):.1f}")
-        c_  = _esc(f"{item.get('c', 0):.1f}")
+    for item in items:
+        emoji  = _pick_emoji(item.get("name", ""))
+        name   = _esc(item.get("name", ""))
+        weight = item.get("weight") or 0
+        cal    = _esc(f"{item.get('calories', 0):.0f}")
+        p_     = _esc(f"{item.get('p', 0):.1f}")
+        f_     = _esc(f"{item.get('f', 0):.1f}")
+        c_     = _esc(f"{item.get('c', 0):.1f}")
+        w_part = f" {_esc(str(int(weight)))}г" if weight > 0 else ""
+        ai_tag = " _\\(оценка ИИ\\)_" if not item.get("from_db", True) else ""
         lines.append(
-            f"{emoji} *{_esc(item['name'])}*{w_part}: "
-            f"{cal} ккал \\| Б: {p_} \\| Ж: {f_v} \\| У: {c_}"
+            f"{emoji} *{name}*{w_part}{ai_tag}\n"
+            f"   {cal} ккал  \\|  Б:{p_}  Ж:{f_}  У:{c_}"
         )
 
-    lines.append("ーーー")
-    lines.append(
-        f"📊 *Итого:* {_esc(f'{total_cal:.0f}')} / {_esc(str(target))} ккал "
-        f"\\| Б: {_esc(f'{total_p:.1f}')} "
-        f"\\| Ж: {_esc(f'{total_f:.1f}')} "
-        f"\\| У: {_esc(f'{total_c:.1f}')}"
-    )
+    # Мини-итог дня
+    new_total = eaten_before + added_cal
+    remaining = target - new_total
+    lines += [
+        "",
+        "┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄",
+        f"*Итого за день:* {_esc(f'{new_total:.0f}')} / {_esc(str(target))} ккал",
+        f"`{_bar(new_total, target, 14)}`",
+    ]
+    if remaining >= 0:
+        lines.append(f"Осталось: *{_esc(f'{remaining:.0f}')}* ккал")
+    else:
+        lines.append(f"⚠️ Превышение: *{_esc(f'{abs(remaining):.0f}')}* ккал")
+
     return "\n".join(lines)
 
 
@@ -297,7 +379,8 @@ def _build_delete_keyboard(foods: list[dict]) -> InlineKeyboardMarkup:
 
 
 _DIARY_KB = InlineKeyboardMarkup(inline_keyboard=[[
-    InlineKeyboardButton(text="📋 Рацион / удалить блюда", callback_data="diary_today"),
+    InlineKeyboardButton(text="📋 Дневник дня", callback_data="diary_today"),
+    InlineKeyboardButton(text="❌ Удалить блюдо", callback_data="diary_today"),
 ]])
 
 
@@ -307,27 +390,9 @@ async def _send_stats(message: Message, user_id: int, target: int, date_str: str
     foods  = get_today_foods(user_id, date_str)
     burned = get_today_burned(user_id, date_str)
 
-    total_cal = sum(f.get("calories", 0) for f in foods)
-    total_p   = sum(f.get("p", 0) for f in foods)
-    total_f   = sum(f.get("f", 0) for f in foods)
-    total_c   = sum(f.get("c", 0) for f in foods)
-    net       = total_cal - burned
-
-    text = (
-        f"📅 *Итог за сегодня:*\n\n"
-        f"📊 Калории: *{_esc(f'{total_cal:.0f}')}* / {_esc(str(target))} ккал "
-        f"{_esc(_bar(total_cal, target))}\n"
-        f"🔥 Сгорело: *{_esc(f'{burned:.0f}')}* ккал\n"
-        f"⚖️ Баланс: *{_esc(f'{net:.0f}')}* ккал\n\n"
-        f"🥩 Белки: *{_esc(f'{total_p:.1f}')}* / {_esc(str(_NORM_P))} г "
-        f"{_esc(_bar(total_p, _NORM_P))}\n"
-        f"🥑 Жиры: *{_esc(f'{total_f:.1f}')}* / {_esc(str(_NORM_F))} г "
-        f"{_esc(_bar(total_f, _NORM_F))}\n"
-        f"🍞 Углеводы: *{_esc(f'{total_c:.1f}')}* / {_esc(str(_NORM_C))} г "
-        f"{_esc(_bar(total_c, _NORM_C))}"
-    )
+    text = _fmt_full_day(foods, target, burned)
     kb = InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="📋 Рацион / удалить блюда", callback_data="diary_today"),
+        InlineKeyboardButton(text="📋 Дневник / удалить блюда", callback_data="diary_today"),
     ]])
     await message.answer(text, parse_mode="MarkdownV2", reply_markup=kb)
 
@@ -347,8 +412,8 @@ async def _process_intent(
 
     # ── FOOD: log_food ────────────────────────────────────────────────────────
     if rtype == "food" and action == "log_food":
-        raw_items  = result.get("items", [])
-        meal_type  = result.get("meal_type") or _meal_type_by_time()
+        raw_items = result.get("items", [])
+        meal_type = result.get("meal_type") or _meal_type_by_time()
         if not raw_items:
             await message.answer("Не распознал продукты — попробуй ещё раз.")
             return
@@ -361,7 +426,7 @@ async def _process_intent(
         logger.info("user={} logged {} items (meal={})", user_id, len(items), meal_type)
 
         await message.answer(
-            _fmt_food_items(items, target, eaten_before),
+            _fmt_log_confirm(items, meal_type, target, eaten_before),
             parse_mode="MarkdownV2",
             reply_markup=_DIARY_KB,
         )
@@ -372,9 +437,10 @@ async def _process_intent(
         product_name = result.get("product_name", "")
         if product_name:
             delete_food_from_db(user_id, date_str, product_name)
-        foods = get_today_foods(user_id, date_str)
+        foods  = get_today_foods(user_id, date_str)
+        burned = get_today_burned(user_id, date_str)
         await message.answer(
-            _fmt_daily_log(foods, target),
+            _fmt_full_day(foods, target, burned),
             parse_mode="MarkdownV2",
             reply_markup=_build_delete_keyboard(foods) if foods else None,
         )
@@ -385,7 +451,6 @@ async def _process_intent(
         product_name = result.get("product_name", "")
         new_weight   = float(result.get("new_weight", 0))
         if product_name and new_weight > 0:
-            # Пересчитать КБЖУ из базы по новому весу
             found = food_db.search(product_name, new_weight)
             if found:
                 update_food_in_db(
@@ -393,9 +458,10 @@ async def _process_intent(
                     found["calories"], found["p"], found["f"], found["c"],
                     weight=new_weight,
                 )
-        foods = get_today_foods(user_id, date_str)
+        foods  = get_today_foods(user_id, date_str)
+        burned = get_today_burned(user_id, date_str)
         await message.answer(
-            _fmt_daily_log(foods, target),
+            _fmt_full_day(foods, target, burned),
             parse_mode="MarkdownV2",
             reply_markup=_build_delete_keyboard(foods) if foods else None,
         )
@@ -414,9 +480,10 @@ async def _process_intent(
                     found["calories"], found["p"], found["f"], found["c"],
                     weight=new_weight,
                 )
-        foods = get_today_foods(user_id, date_str)
+        foods  = get_today_foods(user_id, date_str)
+        burned = get_today_burned(user_id, date_str)
         await message.answer(
-            _fmt_daily_log(foods, target),
+            _fmt_full_day(foods, target, burned),
             parse_mode="MarkdownV2",
             reply_markup=_build_delete_keyboard(foods) if foods else None,
         )
@@ -429,8 +496,10 @@ async def _process_intent(
         if burned > 0:
             log_activity_to_db(user_id, date_str, description, burned)
         desc_part = f" — {_esc(description)}" if description else ""
+        total_burned = get_today_burned(user_id, date_str)
         await message.answer(
-            f"💪 *Сгорело {_esc(f'{burned:.0f}')} ккал*{desc_part}\\.\nДобавлено в зачёт дня\\.",
+            f"💪 *Сгорело {_esc(f'{burned:.0f}')} ккал*{desc_part}\n"
+            f"Всего сожжено сегодня: *{_esc(f'{total_burned:.0f}')}* ккал",
             parse_mode="MarkdownV2",
         )
         return
@@ -453,11 +522,15 @@ async def start_handler(message: Message):
     target  = get_or_create_user(user_id, name)
     logger.info("user={} /start", user_id)
     await message.answer(
-        f"Привет, {name}\\! 👋 Я твой ИИ\\-дневник питания\\.\n\n"
-        f"📊 Дневная норма: *{_esc(str(target))} ккал*\n\n"
-        f"🎙️ Скажи голосом или напиши что съел — запишу КБЖУ\\.\n"
-        f"💪 Расскажи об активности — посчитаю сожжённые калории\\.\n"
-        f"💡 Задай вопрос — отвечу с учётом твоего дня\\.\n\n"
+        f"Привет, {_esc(name)}\\! 👋\n\n"
+        f"Я твой AI\\-дневник питания в стиле FatSecret\\.\n\n"
+        f"📊 Дневная цель: *{_esc(str(target))} ккал*\n"
+        f"🥩 Белки: *{_esc(str(_NORM_P))} г*  "
+        f"🥑 Жиры: *{_esc(str(_NORM_F))} г*  "
+        f"🍞 Углеводы: *{_esc(str(_NORM_C))} г*\n\n"
+        f"🎙️ Скажи голосом или напиши что съел\n"
+        f"💪 Расскажи об активности\n"
+        f"📋 Нажми *Статистика за день* чтобы открыть дневник\n\n"
         f"База продуктов: *10 000\\+* позиций",
         parse_mode="MarkdownV2",
         reply_markup=get_reply_menu(),
@@ -495,13 +568,11 @@ async def voice_handler(message: Message):
     target   = get_or_create_user(user_id, name)
     date_str = datetime.now().strftime("%Y-%m-%d")
 
-    # Скачать OGG
     voice_file = await bot.get_file(message.voice.file_id)
     buf = io.BytesIO()
     await bot.download_file(voice_file.file_path, destination=buf)
     ogg_bytes = buf.getvalue()
 
-    # Groq Whisper
     try:
         recognized = await groq_service.transcribe(ogg_bytes)
     except Exception as e:
@@ -566,14 +637,12 @@ async def cb_diary_today(callback: CallbackQuery):
     date_str = datetime.now().strftime("%Y-%m-%d")
     target   = get_or_create_user(user_id, callback.from_user.full_name or "друг")
     foods    = get_today_foods(user_id, date_str)
-    if foods:
-        await callback.message.answer(
-            _fmt_daily_log(foods, target),
-            parse_mode="MarkdownV2",
-            reply_markup=_build_delete_keyboard(foods),
-        )
-    else:
-        await callback.message.answer("Сегодня записей нет.")
+    burned   = get_today_burned(user_id, date_str)
+    await callback.message.answer(
+        _fmt_full_day(foods, target, burned),
+        parse_mode="MarkdownV2",
+        reply_markup=_build_delete_keyboard(foods) if foods else None,
+    )
 
 
 @dp.callback_query(F.data.startswith("del_food:"))
@@ -583,15 +652,19 @@ async def cb_delete_food(callback: CallbackQuery):
     date_str = datetime.now().strftime("%Y-%m-%d")
     target   = get_or_create_user(user_id, callback.from_user.full_name or "друг")
     delete_food_by_id(food_id)
-    foods = get_today_foods(user_id, date_str)
+    foods  = get_today_foods(user_id, date_str)
+    burned = get_today_burned(user_id, date_str)
     if foods:
         await callback.message.edit_text(
-            _fmt_daily_log(foods, target),
+            _fmt_full_day(foods, target, burned),
             parse_mode="MarkdownV2",
             reply_markup=_build_delete_keyboard(foods),
         )
     else:
-        await callback.message.edit_text("Рацион за сегодня пуст\\.", parse_mode="MarkdownV2")
+        await callback.message.edit_text(
+            _fmt_full_day([], target, 0.0),
+            parse_mode="MarkdownV2",
+        )
     await callback.answer("Удалено ✓")
 
 
@@ -602,7 +675,7 @@ async def cb_clear_day(callback: CallbackQuery):
     soft_delete_today(user_id, date_str)
     kb = InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(text="↩️ Восстановить", callback_data="restore_day"),
-        InlineKeyboardButton(text="🗑️ Удалить",      callback_data="confirm_clear"),
+        InlineKeyboardButton(text="🗑️ Удалить навсегда", callback_data="confirm_clear"),
     ]])
     await callback.message.edit_text(
         "🧹 Лог за сегодня очищен\\!\n\nВосстановить записи?",
@@ -619,8 +692,9 @@ async def cb_restore_day(callback: CallbackQuery):
     restore_today(user_id, date_str)
     target = get_or_create_user(user_id, callback.from_user.full_name or "друг")
     foods  = get_today_foods(user_id, date_str)
+    burned = get_today_burned(user_id, date_str)
     await callback.message.edit_text(
-        _fmt_daily_log(foods, target),
+        _fmt_full_day(foods, target, burned),
         parse_mode="MarkdownV2",
         reply_markup=_build_delete_keyboard(foods) if foods else None,
     )
@@ -648,7 +722,7 @@ async def cb_ask_food(callback: CallbackQuery):
     await callback.message.answer("💡 Напиши название продукта — скажу, стоит ли его есть.")
 
 
-# ── Веб-сервер для health-check (Render / Railway) ────────────────────────────
+# ── Веб-сервер для health-check (Render) ─────────────────────────────────────
 
 PORT = int(os.environ.get("PORT", 10000))
 
@@ -662,7 +736,7 @@ async def _ping(request: web.Request) -> web.Response:
 async def main():
     init_db()
 
-    # Загрузить базу продуктов из GitHub (блокирующий вызов в пуле потоков)
+    # Загрузить базу продуктов из GitHub
     await asyncio.to_thread(food_db.preload)
     # Фоновое обновление кэша каждые 5 минут
     asyncio.create_task(food_db.refresh_loop())
