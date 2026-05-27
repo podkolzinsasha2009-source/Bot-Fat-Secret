@@ -30,6 +30,23 @@ _LINE_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Процент жирности / число в запросе: «3.2», «2,5», «5%»
+_PCT_RE = re.compile(r'\b(\d+[.,]\d+|\d+)\s*%?')
+
+
+def _extract_pct(text: str) -> str | None:
+    """Извлечь числовое значение жирности/процента из строки."""
+    m = _PCT_RE.search(text)
+    return m.group(1).replace(",", ".") if m else None
+
+
+def _base_word(text: str) -> str:
+    """Первое незначащее слово длиной ≥ 3 символов (не цифра)."""
+    for w in text.split():
+        if len(w) >= 3 and not re.match(r"^\d", w):
+            return w
+    return text.split()[0] if text else text
+
 
 def _gh_headers() -> dict:
     return {
@@ -118,26 +135,49 @@ def search(query: str, weight: float) -> dict | None:
             "from_db": True,
         }
 
+    pct     = _extract_pct(q)          # «3.2» из «молоко лебедянское 3.2»
+    base    = _base_word(q)            # «молоко» из «молоко лебедянское 3.2»
+    pct_alt = pct.replace(".", ",") if pct else None   # «3,2» — альтернативный разделитель
+
     # 1. Точное совпадение
     if q in _db:
         return _result(q)
 
-    # 2. Ключ является подстрокой запроса
-    #    (запрос содержит название продукта из базы)
-    #    Минимальная длина ключа = 3 символа, чтоб «из», «на» не срабатывали
+    # 2. Ключ ⊂ запрос → самый ДЛИННЫЙ ключ
+    #    «молоко лебедянское» ⊂ «молоко лебедянское 3.2» → бренд найден
     key_in_query = [k for k in names if len(k) >= 3 and k in q]
     if key_in_query:
-        best = max(key_in_query, key=len)   # наиболее длинный = специфичный
+        best = max(key_in_query, key=len)
         return _result(best)
 
-    # 3. Запрос является подстрокой ключа
-    #    Берём кратчайший ключ — простейший продукт, не составной
+    # 3. Базовое слово + точная жирность/процент
+    #    «молоко» + «3.2» → ищем «молоко 3.2%», «молоко 3,2» и т.п.
+    #    Важнее бренда: молоко 3.2% точнее чем просто «молоко»
+    if pct and base:
+        pct_matches = [
+            k for k in names
+            if base in k and (pct in k or (pct_alt and pct_alt in k))
+        ]
+        if pct_matches:
+            best = min(pct_matches, key=len)   # кратчайший с нужным процентом
+            return _result(best)
+
+    # 4. Запрос ⊂ ключ → самый КОРОТКИЙ ключ
+    #    «сахар» ⊂ «epica без сахара» → берём «сахар»
     query_in_key = [k for k in names if len(q) >= 3 and q in k]
     if query_in_key:
-        best = min(query_in_key, key=len)   # кратчайший = «сахар», а не «epica без сахара»
+        best = min(query_in_key, key=len)
         return _result(best)
 
-    # 4. Fuzzy-поиск
+    # 5. Базовое слово в ключе → самый короткий из них
+    #    Запасной вариант: хоть что-то с нужным продуктом
+    if base and base != q:
+        base_matches = [k for k in names if len(base) >= 3 and base in k]
+        if base_matches:
+            best = min(base_matches, key=len)
+            return _result(best)
+
+    # 6. Fuzzy-поиск
     result = process.extractOne(q, names, scorer=fuzz.token_set_ratio)
     if result and result[1] >= FUZZY_THRESHOLD:
         return _result(result[0])
