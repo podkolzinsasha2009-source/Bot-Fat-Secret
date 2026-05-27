@@ -91,7 +91,16 @@ async def refresh_loop() -> None:
 def search(query: str, weight: float) -> dict | None:
     """
     Найти продукт и вернуть КБЖУ для указанного веса.
-    Работает из памяти — не блокирует event loop.
+
+    Приоритеты поиска:
+      1. Точное совпадение ключа — «сахар» → «Сахар»
+      2. Ключ ⊂ запрос → берём ДЛИННЕЙШИЙ ключ (наиболее специфичный)
+         «молоко лебедянское 3.2» содержит «молоко лебедянское» и «молоко»
+         → вернём «молоко лебедянское»
+      3. Запрос ⊂ ключ → берём КРАТЧАЙШИЙ ключ (простейший продукт)
+         «сахар» есть и в «epica без сахара», и в «сахар-рафинад», и в «сахар»
+         → вернём «сахар» (самый короткий)
+      4. Fuzzy token_set_ratio ≥ 70
     """
     if not _db:
         return None
@@ -99,22 +108,8 @@ def search(query: str, weight: float) -> dict | None:
     q = query.lower().strip()
     names = list(_db.keys())
 
-    # 1. Точное вхождение подстроки
-    for name_key in names:
-        if q in name_key or name_key in q:
-            display, k, b, j, u = _db[name_key]
-            f = weight / 100.0
-            return {
-                "name": display, "weight": weight,
-                "calories": round(k * f, 1), "p": round(b * f, 1),
-                "f": round(j * f, 1), "c": round(u * f, 1),
-                "from_db": True,
-            }
-
-    # 2. Fuzzy-поиск
-    result = process.extractOne(q, names, scorer=fuzz.token_set_ratio)
-    if result and result[1] >= FUZZY_THRESHOLD:
-        display, k, b, j, u = _db[result[0]]
+    def _result(key: str) -> dict:
+        display, k, b, j, u = _db[key]
         f = weight / 100.0
         return {
             "name": display, "weight": weight,
@@ -122,6 +117,30 @@ def search(query: str, weight: float) -> dict | None:
             "f": round(j * f, 1), "c": round(u * f, 1),
             "from_db": True,
         }
+
+    # 1. Точное совпадение
+    if q in _db:
+        return _result(q)
+
+    # 2. Ключ является подстрокой запроса
+    #    (запрос содержит название продукта из базы)
+    #    Минимальная длина ключа = 3 символа, чтоб «из», «на» не срабатывали
+    key_in_query = [k for k in names if len(k) >= 3 and k in q]
+    if key_in_query:
+        best = max(key_in_query, key=len)   # наиболее длинный = специфичный
+        return _result(best)
+
+    # 3. Запрос является подстрокой ключа
+    #    Берём кратчайший ключ — простейший продукт, не составной
+    query_in_key = [k for k in names if len(q) >= 3 and q in k]
+    if query_in_key:
+        best = min(query_in_key, key=len)   # кратчайший = «сахар», а не «epica без сахара»
+        return _result(best)
+
+    # 4. Fuzzy-поиск
+    result = process.extractOne(q, names, scorer=fuzz.token_set_ratio)
+    if result and result[1] >= FUZZY_THRESHOLD:
+        return _result(result[0])
 
     return None
 
