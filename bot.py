@@ -50,6 +50,9 @@ _NORM_P, _NORM_F, _NORM_C = (
 
 # ── Приёмы пищи ───────────────────────────────────────────────────────────────
 
+# Пользователи, ожидающие ввода редактирования после нажатия ✏️
+_awaiting_edit: set[int] = set()
+
 _MEAL_ORDER = ["Завтрак", "Обед", "Полдник", "Ужин", "Перекус"]
 _MEAL_ICONS = {
     "Завтрак": "🌅",
@@ -422,8 +425,9 @@ async def _process_intent(
     message: Message, user_id: int,
     user_text: str, context: str,
     target: int, date_str: str,
+    force_edit: bool = False,
 ) -> None:
-    result = await gemini_service.extract_intent(user_text, context)
+    result = await gemini_service.extract_intent(user_text, context, force_edit=force_edit)
     logger.info("user={} intent type={} action={}", user_id, result.get("type"), result.get("action"))
 
     rtype  = result.get("type", "")
@@ -611,13 +615,18 @@ async def voice_handler(message: Message):
     logger.info("user={} voice: {!r}", user_id, recognized)
     await message.answer(f"🎙️ _{_esc(recognized)}_", parse_mode="MarkdownV2")
 
+    # Проверяем режим редактирования (нажата ✏️)
+    force_edit = user_id in _awaiting_edit
+    _awaiting_edit.discard(user_id)
+
     foods   = get_today_foods(user_id, date_str)
     burned  = get_today_burned(user_id, date_str)
     eaten   = sum(f.get("calories", 0) for f in foods)
     context = _build_context(target, eaten, burned, foods)
 
     try:
-        await _process_intent(message, user_id, recognized, context, target, date_str)
+        await _process_intent(message, user_id, recognized, context, target, date_str,
+                              force_edit=force_edit)
     except Exception as e:
         logger.error("user={} AI error: {}", user_id, e)
         await message.answer(f"Ошибка ИИ: {e}")
@@ -644,13 +653,19 @@ async def text_handler(message: Message):
         return
 
     logger.info("user={} text: {!r}", user_id, message.text[:80])
+
+    # Проверяем режим редактирования (нажата ✏️)
+    force_edit = user_id in _awaiting_edit
+    _awaiting_edit.discard(user_id)
+
     foods   = get_today_foods(user_id, date_str)
     burned  = get_today_burned(user_id, date_str)
     eaten   = sum(f.get("calories", 0) for f in foods)
     context = _build_context(target, eaten, burned, foods)
 
     try:
-        await _process_intent(message, user_id, message.text, context, target, date_str)
+        await _process_intent(message, user_id, message.text, context, target, date_str,
+                              force_edit=force_edit)
     except Exception as e:
         logger.error("user={} AI error: {}", user_id, e)
         await message.answer(f"Ошибка ИИ: {e}")
@@ -753,11 +768,13 @@ async def cb_ask_food(callback: CallbackQuery):
 @dp.callback_query(F.data == "hint_edit")
 async def cb_hint_edit(callback: CallbackQuery):
     await callback.answer()
+    _awaiting_edit.add(callback.from_user.id)   # следующее сообщение = редактирование
     await callback.message.answer(
         "✏️ *Что изменить?* Просто напиши:\n\n"
-        "• «молоко было 200г» — изменить вес\n"
-        "• «вместо гречки рис 150г» — заменить продукт\n"
-        "• «удали молоко» — удалить запись",
+        "• «молоко 200г» — изменить вес\n"
+        "• «гречка → рис 150г» — заменить продукт\n"
+        "• «удали молоко» — удалить запись\n\n"
+        "_Одно следующее сообщение будет обработано как редактирование_",
         parse_mode="MarkdownV2",
     )
 

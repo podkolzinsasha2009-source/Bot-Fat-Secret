@@ -103,8 +103,18 @@ def _parse(text: str) -> dict:
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
-async def extract_intent(user_text: str, context: str) -> dict:
-    prompt = f"{_INTENT_SYSTEM}\n\nКонтекст:\n{context}\n\nСообщение пользователя: {user_text}"
+_FORCE_EDIT_PREFIX = """\
+⚠️ РЕЖИМ РЕДАКТИРОВАНИЯ: пользователь явно нажал кнопку «Изменить». \
+Его сообщение — это КОМАНДА РЕДАКТИРОВАНИЯ существующей записи. \
+Верни change_weight, edit_food или delete_food — никогда не log_food. \
+Если пользователь написал только название и вес (например «молоко 200г») — это change_weight. \
+Если написал «X → Y» или «вместо X Y» — это edit_food. \
+Если написал «удали X» — delete_food.\n\n"""
+
+
+async def extract_intent(user_text: str, context: str, force_edit: bool = False) -> dict:
+    prefix = _FORCE_EDIT_PREFIX if force_edit else ""
+    prompt = f"{prefix}{_INTENT_SYSTEM}\n\nКонтекст:\n{context}\n\nСообщение пользователя: {user_text}"
 
     def _call() -> str:
         resp = _client.models.generate_content(
