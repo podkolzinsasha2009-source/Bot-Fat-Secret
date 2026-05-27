@@ -122,7 +122,7 @@ async def extract_intent(user_text: str, context: str, force_edit: bool = False)
             contents=prompt,
             config=types.GenerateContentConfig(
                 response_mime_type="application/json",
-                max_output_tokens=1200,
+                max_output_tokens=4096,
             ),
         )
         return resp.text
@@ -140,7 +140,10 @@ async def extract_intent(user_text: str, context: str, force_edit: bool = False)
             r = _client.models.generate_content(
                 model=_MODEL,
                 contents=repair,
-                config=types.GenerateContentConfig(max_output_tokens=800),
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    max_output_tokens=4096,
+                ),
             )
             return r.text
 
