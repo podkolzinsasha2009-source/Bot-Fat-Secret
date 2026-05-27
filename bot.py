@@ -378,10 +378,29 @@ def _build_delete_keyboard(foods: list[dict]) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
-_DIARY_KB = InlineKeyboardMarkup(inline_keyboard=[[
-    InlineKeyboardButton(text="📋 Дневник дня", callback_data="diary_today"),
-    InlineKeyboardButton(text="❌ Удалить блюдо", callback_data="diary_today"),
-]])
+def _build_logged_kb(logged_foods: list[dict]) -> InlineKeyboardMarkup:
+    """Клавиатура под подтверждением записи: ❌ каждый продукт + ✏️ + 📋"""
+    buttons = []
+    # Кнопки удаления — по одной на строку (или по 2 если названия короткие)
+    row: list[InlineKeyboardButton] = []
+    for item in logged_foods:
+        name_short = item.get("name", "")[:18]
+        btn = InlineKeyboardButton(
+            text=f"❌ {name_short}",
+            callback_data=f"del_food:{item['id']}",
+        )
+        row.append(btn)
+        if len(row) == 2:
+            buttons.append(row)
+            row = []
+    if row:
+        buttons.append(row)
+    # Строка: Изменить + Дневник
+    buttons.append([
+        InlineKeyboardButton(text="✏️ Изменить", callback_data="hint_edit"),
+        InlineKeyboardButton(text="📋 Дневник", callback_data="diary_today"),
+    ])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
 # ── Статистика ────────────────────────────────────────────────────────────────
@@ -425,10 +444,19 @@ async def _process_intent(
         log_food_to_db(user_id, date_str, meal_type, items)
         logger.info("user={} logged {} items (meal={})", user_id, len(items), meal_type)
 
+        # Получаем ID только что добавленных записей (последние N в БД)
+        all_foods_now = get_today_foods(user_id, date_str)
+        just_logged   = all_foods_now[-len(items):]
+        # Переносим emoji и from_db из resolved items
+        for i, src in enumerate(items):
+            if i < len(just_logged):
+                just_logged[i]["emoji"]   = src.get("emoji", _DEFAULT_EMOJI)
+                just_logged[i]["from_db"] = src.get("from_db", True)
+
         await message.answer(
             _fmt_log_confirm(items, meal_type, target, eaten_before),
             parse_mode="MarkdownV2",
-            reply_markup=_DIARY_KB,
+            reply_markup=_build_logged_kb(just_logged),
         )
         return
 
@@ -720,6 +748,18 @@ async def cb_diary_week(callback: CallbackQuery):
 async def cb_ask_food(callback: CallbackQuery):
     await callback.answer()
     await callback.message.answer("💡 Напиши название продукта — скажу, стоит ли его есть.")
+
+
+@dp.callback_query(F.data == "hint_edit")
+async def cb_hint_edit(callback: CallbackQuery):
+    await callback.answer()
+    await callback.message.answer(
+        "✏️ *Что изменить?* Просто напиши:\n\n"
+        "• «молоко было 200г» — изменить вес\n"
+        "• «вместо гречки рис 150г» — заменить продукт\n"
+        "• «удали молоко» — удалить запись",
+        parse_mode="MarkdownV2",
+    )
 
 
 # ── Веб-сервер для health-check (Render) ─────────────────────────────────────
