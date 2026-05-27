@@ -325,6 +325,45 @@ def find_in_cache(name: str) -> dict | None:
         return None
 
 
+# ---------------------------------------------------------------------------
+# Восстановление из Obsidian (после редеплоя)
+# ---------------------------------------------------------------------------
+
+def restore_from_obsidian(user_id: int, date_str: str, foods: list[dict]) -> int:
+    """
+    Восстанавливает записи дня из Obsidian в SQLite.
+    Вызывается при старте только если БД для этого дня пуста.
+    Возвращает количество восстановленных записей.
+    """
+    with sqlite3.connect(DB_PATH) as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT COUNT(*) FROM nutrition_logs WHERE user_id = ? AND date = ? AND is_deleted = 0",
+            (user_id, date_str),
+        )
+        if cursor.fetchone()[0] > 0:
+            return 0  # данные уже есть — не перезаписываем
+
+        for f in foods:
+            cursor.execute(
+                """INSERT INTO nutrition_logs
+                   (user_id, date, meal_type, product_name, weight, calories, proteins, fats, carbs)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    user_id, date_str,
+                    f.get("meal_type", "Перекус"),
+                    f.get("name", ""),
+                    float(f.get("weight", 0)),
+                    float(f.get("calories", 0)),
+                    float(f.get("p", 0)),
+                    float(f.get("f", 0)),
+                    float(f.get("c", 0)),
+                ),
+            )
+        conn.commit()
+        return len(foods)
+
+
 def upsert_cache(items: list[dict]) -> None:
     """
     Сохраняет / обновляет данные на 100г для каждого продукта.

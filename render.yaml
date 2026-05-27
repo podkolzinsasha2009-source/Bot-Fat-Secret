@@ -28,3 +28,5 @@ services:
         value: "220"
       - key: PORT
         value: "10000"
+      - key: TELEGRAM_USER_ID
+        sync: false
